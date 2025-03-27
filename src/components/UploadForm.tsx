@@ -1,33 +1,41 @@
 // src/components/UploadForm.tsx
 import React, { useState, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Cloud, CheckCircle, AlertCircle, File } from 'lucide-react';
+import { Upload, Cloud, CheckCircle, AlertCircle, File, Info } from 'lucide-react';
+import { generateFileHashFromFile } from '@/lib/utils/fileHash';
 
 interface UploadFormProps {
   onUpload: (file: File) => Promise<void>;
   onS3Import: (key: string) => Promise<void>;
 }
 
+interface UploadingFile {
+  id: string;
+  name: string;
+  size: number;
+  progress: number;
+  status: 'pending' | 'uploading' | 'completed' | 'error' | 'duplicate';
+  error?: string;
+}
+
 const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
-  const [uploading, setUploading] = useState<Array<{
-    id: string;
-    name: string;
-    size: number;
-    progress: number;
-    status: 'pending' | 'uploading' | 'completed' | 'error';
-  }>>([]);
+  const [uploading, setUploading] = useState<UploadingFile[]>([]);
   const [s3Key, setS3Key] = useState('');
   const [batchUploadProgress, setBatchUploadProgress] = useState(0);
   const [totalFiles, setTotalFiles] = useState(0);
   const [processedFiles, setProcessedFiles] = useState(0);
+  const [duplicateFiles, setDuplicateFiles] = useState<string[]>([]);
   const processingRef = useRef(false);
+
+  // Store file hashes to prevent duplicate uploads in the same batch
+  const fileHashesRef = useRef<Set<string>>(new Set());
 
   // Simulate progress - define before using in onDrop
   const simulateProgress = useCallback((fileId: string) => {
     return setInterval(() => {
       setUploading(prev => {
         const currentItem = prev.find(item => item.id === fileId);
-        if (!currentItem || currentItem.status === 'completed' || currentItem.status === 'error') {
+        if (!currentItem || ['completed', 'error', 'duplicate'].includes(currentItem.status)) {
           return prev;
         }
         
@@ -42,9 +50,48 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
     }, 300);
   }, []);
 
+  // Check if file is a duplicate
+  const checkDuplicate = useCallback(async (file: File): Promise<boolean> => {
+    try {
+      // Generate hash for the file
+      const hash = await generateFileHashFromFile(file);
+      
+      // Check if hash already exists in our local reference
+      if (fileHashesRef.current.has(hash)) {
+        return true;
+      }
+      
+      // Check against server API for existing files
+      const formData = new FormData();
+      formData.append('checkOnly', 'true');
+      formData.append('hash', hash);
+      
+      const response = await fetch('/api/recordings/check-duplicate', {
+        method: 'POST',
+        body: formData
+      });
+      
+      const data = await response.json();
+      
+      if (data.duplicate) {
+        return true;
+      }
+      
+      // If not a duplicate, add to our set for future reference
+      fileHashesRef.current.add(hash);
+      return false;
+    } catch (error) {
+      console.error('Error checking for duplicate:', error);
+      return false; // Assume not duplicate on error
+    }
+  }, []);
+
   // Handle file drop for multiple files
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
+    
+    // Clear duplicate files tracking
+    setDuplicateFiles([]);
     
     // Handle batch upload for multiple files
     if (acceptedFiles.length > 1) {
@@ -53,23 +100,39 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
     }
     
     // Handle single file upload
+    const file = acceptedFiles[0];
     const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
     // Add file to uploading list
     setUploading(prev => [...prev, {
       id: fileId,
-      name: acceptedFiles[0].name,
-      size: acceptedFiles[0].size,
+      name: file.name,
+      size: file.size,
       progress: 0,
       status: 'pending'
     }]);
 
     try {
+      // Check for duplicate first
+      const isDuplicate = await checkDuplicate(file);
+      
+      if (isDuplicate) {
+        setUploading(prev => 
+          prev.map(item => 
+            item.id === fileId 
+              ? { ...item, progress: 100, status: 'duplicate', error: 'File already exists' } 
+              : item
+          )
+        );
+        setDuplicateFiles(prev => [...prev, file.name]);
+        return;
+      }
+      
       // Start progress simulation
       const progressInterval = simulateProgress(fileId);
       
       // Perform the actual upload
-      await onUpload(acceptedFiles[0]);
+      await onUpload(file);
       
       // Clear interval and set status to completed
       clearInterval(progressInterval);
@@ -90,12 +153,12 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
       setUploading(prev => 
         prev.map(item => 
           item.id === fileId 
-            ? { ...item, status: 'error' } 
+            ? { ...item, status: 'error', error: error instanceof Error ? error.message : 'Upload failed' } 
             : item
         )
       );
     }
-  }, [onUpload, simulateProgress]);
+  }, [onUpload, simulateProgress, checkDuplicate]);
 
   // Handle batch upload of multiple files
   const handleBatchUpload = useCallback(async (files: File[]) => {
@@ -106,6 +169,7 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
     setTotalFiles(files.length);
     setProcessedFiles(0);
     setBatchUploadProgress(0);
+    setDuplicateFiles([]);
     
     // Create entries for all files
     const fileEntries = files.map(file => ({
@@ -121,6 +185,7 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
     // Process files in batches of 5 to avoid overwhelming the server
     const batchSize = 5;
     const fileBatches = [];
+    const duplicates: string[] = [];
     
     for (let i = 0; i < files.length; i += batchSize) {
       fileBatches.push(files.slice(i, i + batchSize));
@@ -133,10 +198,33 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
           const currentIndex = i * batchSize + index;
           const fileId = fileEntries[currentIndex].id;
           
-          // Start progress simulation
-          const progressInterval = simulateProgress(fileId);
-          
           try {
+            // Check for duplicate first
+            const isDuplicate = await checkDuplicate(file);
+            
+            if (isDuplicate) {
+              duplicates.push(file.name);
+              setUploading(prev => 
+                prev.map(item => 
+                  item.id === fileId 
+                    ? { ...item, progress: 100, status: 'duplicate', error: 'File already exists' } 
+                    : item
+                )
+              );
+              
+              // Update processed count
+              setProcessedFiles(prev => {
+                const newValue = prev + 1;
+                setBatchUploadProgress(Math.round((newValue / files.length) * 100));
+                return newValue;
+              });
+              
+              return;
+            }
+            
+            // Start progress simulation
+            const progressInterval = simulateProgress(fileId);
+            
             // Perform the actual upload
             await onUpload(file);
             
@@ -148,18 +236,22 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
                   : item
               )
             );
+            
+            clearInterval(progressInterval);
           } catch (error) {
             console.error(`Error uploading ${file.name}:`, error);
             setUploading(prev => 
               prev.map(item => 
                 item.id === fileId 
-                  ? { ...item, status: 'error' } 
+                  ? { 
+                      ...item, 
+                      status: 'error', 
+                      error: error instanceof Error ? error.message : 'Upload failed' 
+                    } 
                   : item
               )
             );
           } finally {
-            clearInterval(progressInterval);
-            
             // Update processed count and overall progress
             setProcessedFiles(prev => {
               const newValue = prev + 1;
@@ -171,15 +263,20 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
       );
     }
     
+    // Update duplicate files state
+    if (duplicates.length > 0) {
+      setDuplicateFiles(duplicates);
+    }
+    
     // Clean up completed files after a delay
     setTimeout(() => {
       setUploading(prev => 
-        prev.filter(item => item.status === 'error' || item.status === 'uploading')
+        prev.filter(item => ['error', 'uploading'].includes(item.status))
       );
       processingRef.current = false;
     }, 5000);
     
-  }, [onUpload, simulateProgress]);
+  }, [onUpload, simulateProgress, checkDuplicate]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -244,7 +341,7 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
       setUploading(prev => 
         prev.map(item => 
           item.id === fileId 
-            ? { ...item, status: 'error' } 
+            ? { ...item, status: 'error', error: error instanceof Error ? error.message : 'Import failed' } 
             : item
         )
       );
@@ -279,6 +376,33 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
           </div>
         </div>
       </div>
+
+      {/* Duplicate Files Warning */}
+      {duplicateFiles.length > 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+          <div className="flex items-start">
+            <Info className="h-5 w-5 text-yellow-600 mr-2 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-medium text-yellow-700">
+                {duplicateFiles.length === 1 
+                  ? '1 file was skipped (already exists)' 
+                  : `${duplicateFiles.length} files were skipped (already exist)`}
+              </h3>
+              {duplicateFiles.length <= 5 ? (
+                <ul className="mt-1 text-xs text-yellow-600 list-disc list-inside">
+                  {duplicateFiles.map((file, i) => (
+                    <li key={i}>{file}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-xs text-yellow-600">
+                  {duplicateFiles.slice(0, 3).join(', ')} and {duplicateFiles.length - 3} more...
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Batch Upload Progress */}
       {totalFiles > 1 && (
@@ -318,17 +442,26 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
                   {item.status === 'error' && (
                     <AlertCircle className="h-4 w-4 text-red-500" />
                   )}
+                  {item.status === 'duplicate' && (
+                    <Info className="h-4 w-4 text-yellow-500" />
+                  )}
                   {item.status === 'uploading' && (
                     <span className="text-xs text-indigo-600 font-medium">
                       {item.progress}%
                     </span>
                   )}
                 </div>
-                {item.size > 0 && (
-                  <div className="flex items-center text-xs text-gray-500">
-                    <span>{formatFileSize(item.size)}</span>
-                  </div>
-                )}
+                <div className="flex items-center text-xs text-gray-500">
+                  {item.size > 0 && (
+                    <span className="mr-2">{formatFileSize(item.size)}</span>
+                  )}
+                  {item.error && (
+                    <span className="text-red-500">{item.error}</span>
+                  )}
+                  {item.status === 'duplicate' && (
+                    <span className="text-yellow-500">File already exists</span>
+                  )}
+                </div>
                 <div className="h-1 bg-gray-100 rounded-full mt-1">
                   <div 
                     className={`h-1 rounded-full ${
@@ -336,7 +469,9 @@ const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
                         ? 'bg-green-500' 
                         : item.status === 'error' 
                           ? 'bg-red-500' 
-                          : 'bg-indigo-600'
+                          : item.status === 'duplicate'
+                            ? 'bg-yellow-500'
+                            : 'bg-indigo-600'
                     }`}
                     style={{ width: `${item.progress}%` }}
                   ></div>

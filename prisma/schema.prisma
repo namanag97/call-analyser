@@ -8,65 +8,51 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum RecordingStatus {
-  UPLOADED
-  PENDING_TRANSCRIPTION
-  TRANSCRIBING
-  COMPLETED
-  FAILED_TRANSCRIPTION
-  DUPLICATE
-}
-
-enum RecordingSource {
-  UPLOAD
-  S3
-}
-
-enum TranscriptionStatus {
-  PENDING
-  IN_PROGRESS
-  COMPLETED
-  FAILED
-}
-
 model Recording {
-  id          String           @id @default(uuid())
+  id          String        @id @default(uuid())
   filename    String
-  filepath    String           // Path to the stored file
+  filepath    String
   filesize    Int
-  contentHash String?          @unique // SHA-256 hash for deduplication
-  duration    Int?             // Duration in seconds
-  agent       String?          @default("Unassigned")
-  callType    String?          @default("Unclassified")
-  status      RecordingStatus  @default(UPLOADED)
-  source      RecordingSource  @default(UPLOAD)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  contentHash String?       @unique // SHA-256 hash for deduplication
+  duration    String?
+  agent       String?       @default("Unassigned")
+  callType    String?       @default("Unclassified")
+  status      String        @default("processing") // processing, COMPLETED, FAILED_TRANSCRIPTION, PENDING_TRANSCRIPTION, TRANSCRIBING
+  source      String        @default("upload") // upload, s3
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
   transcription Transcription?
+  transcriptionLock TranscriptionLock?
 }
 
 model Transcription {
-  id              String              @id @default(uuid())
-  recordingId     String              @unique
-  recording       Recording           @relation(fields: [recordingId], references: [id], onDelete: Cascade)
-  status          TranscriptionStatus @default(PENDING)
-  text            String?             @db.Text
-  language        String              @default("en")
-  speakers        Int?
-  segments        Json?               // Array of { speaker: string, start_seconds: float, end_seconds: float, text: string }
-  processingTimeMs Int?               // Processing time in milliseconds
-  modelId         String?             // The model used for transcription
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  error           String?             @db.Text
+  id            String      @id @default(uuid())
+  recordingId   String      @unique
+  recording     Recording   @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  status        String      @default("pending") // pending, processing, completed, error
+  text          String?     @db.Text
+  language      String      @default("en")
+  speakers      Int?
+  processingTimeMs Int?     // Time taken to transcribe in milliseconds
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  error         String?     @db.Text
 }
 
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  name      String?
-  role      String   @default("user") // user, admin
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// Transcription lock to prevent duplicate processing
+model TranscriptionLock {
+  recordingId   String      @id
+  recording     Recording   @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+}
+
+model TranscriptionSettings {
+  id            String      @id @default(uuid())
+  apiKey        String
+  modelId       String      @default("scribe_v1")
+  language      String      @default("en")
+  active        Boolean     @default(true)
+  batchSize     Int         @default(5)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 }

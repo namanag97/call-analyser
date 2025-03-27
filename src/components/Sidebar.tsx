@@ -2,7 +2,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Upload, Play, Cloud, ChevronRight } from 'lucide-react';
+import { Upload, Play, Cloud, ChevronRight, FileText } from 'lucide-react';
 
 const Sidebar = () => {
   const pathname = usePathname();
@@ -31,6 +31,17 @@ const Sidebar = () => {
           </li>
           <li className="mb-2">
             <Link 
+              href="/transcriptions"
+              className={`flex items-center w-full p-2 rounded ${
+                pathname === '/transcriptions' ? 'bg-indigo-800' : 'hover:bg-indigo-800'
+              }`}
+            >
+              <FileText className="h-4 w-4 mr-2" />
+              <span>Transcriptions</span>
+            </Link>
+          </li>
+          <li className="mb-2">
+            <Link 
               href="/uploads"
               className={`flex items-center w-full p-2 rounded ${
                 pathname === '/uploads' ? 'bg-indigo-800' : 'hover:bg-indigo-800'
@@ -53,7 +64,7 @@ const Sidebar = () => {
           >
             <span className="flex items-center justify-center">
               <Upload className="h-4 w-4 mr-2" />
-              Upload AAC File
+              Upload Audio File
             </span>
           </Link>
           
@@ -69,18 +80,17 @@ const Sidebar = () => {
       
       {/* Future Features */}
       <div className="mt-auto p-4 border-t border-indigo-800">
-        <h2 className="text-xs font-semibold text-indigo-300 uppercase tracking-wider mb-3">Coming Soon</h2>
+        <h2 className="text-xs font-semibold text-indigo-300 uppercase tracking-wider mb-3">Features</h2>
         <ul className="text-sm text-indigo-300">
-          <li className="flex items-center mb-2">
-            <ChevronRight className="h-3 w-3 mr-2" />
-            <span>Call Sentiment Analysis</span>
-          </li>
           <li className="flex items-center mb-2">
             <ChevronRight className="h-3 w-3 mr-2" />
             <span>Transcription Services</span>
           </li>
+          <li className="flex items-center mb-2">
+            <ChevronRight className="h-3 w-3 mr-2" />
+            <span>Call Sentiment Analysis</span>
+          </li>
           <li className="flex items-center">
-          
             <ChevronRight className="h-3 w-3 mr-2" />
             <span>Agent Performance Metrics</span>
           </li>
