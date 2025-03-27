@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
 import LoadingSpinner from '@/components/LoadingSpinner';
@@ -20,7 +20,7 @@ import {
 interface Transcription {
   id: string;
   recordingId: string;
-  status: string;
+  status: 'pending' | 'processing' | 'completed' | 'error';
   text?: string;
   language: string;
   speakers?: number;
@@ -53,6 +53,22 @@ interface Recording {
   transcription?: Transcription;
 }
 
+// Status mapping between recording status and transcription status
+const getRecordingTranscriptionStatus = (recordingStatus: string) => {
+  switch (recordingStatus) {
+    case 'PENDING_TRANSCRIPTION':
+      return 'pending';
+    case 'TRANSCRIBING':
+      return 'processing';
+    case 'COMPLETED':
+      return 'completed';
+    case 'FAILED_TRANSCRIPTION':
+      return 'error';
+    default:
+      return null;
+  }
+};
+
 export default function RecordingDetailPage() {
   const { id } = useParams();
   const recordingId = Array.isArray(id) ? id[0] : id;
@@ -62,32 +78,68 @@ export default function RecordingDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   
-  // Fetch recording details
-  useEffect(() => {
-    const fetchRecording = async () => {
-      try {
-        setLoading(true);
-        
-        const response = await fetch(`/api/recordings/${recordingId}`);
-        
-        if (!response.ok) {
-          throw new Error(`Error fetching recording: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        setRecording(data);
-      } catch (err) {
-        console.error('Failed to fetch recording:', err);
-        setError('Failed to load recording data');
-      } finally {
-        setLoading(false);
+  // Function to fetch recording details
+  const fetchRecording = useCallback(async () => {
+    try {
+      setLoading(true);
+      
+      const response = await fetch(`/api/recordings/${recordingId}`);
+      
+      if (!response.ok) {
+        throw new Error(`Error fetching recording: ${response.status}`);
       }
-    };
-    
+      
+      const data = await response.json();
+      
+      // Ensure there's always a transcription object with correct status
+      if (!data.transcription && data.status) {
+        const mappedStatus = getRecordingTranscriptionStatus(data.status);
+        if (mappedStatus) {
+          data.transcription = {
+            recordingId: data.id,
+            status: mappedStatus,
+            language: 'en',
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt
+          } as Transcription;
+        }
+      }
+      
+      setRecording(data);
+      return data;
+    } catch (err) {
+      console.error('Failed to fetch recording:', err);
+      setError('Failed to load recording data');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, [recordingId]);
+  
+  // Initial fetch
+  useEffect(() => {
     if (recordingId) {
       fetchRecording();
     }
-  }, [recordingId]);
+  }, [recordingId, fetchRecording]);
+  
+  // Set up auto-refresh for pending/processing transcriptions
+  useEffect(() => {
+    if (!recording || !recording.transcription) return;
+    
+    // Only set up polling if transcription is in progress
+    if (recording.transcription.status !== 'pending' && recording.transcription.status !== 'processing') {
+      return;
+    }
+    
+    const intervalId = setInterval(() => {
+      console.log('Auto-refreshing transcription status...');
+      fetchRecording();
+    }, 5000); // Check every 5 seconds
+    
+    // Clean up interval on unmount or when status changes
+    return () => clearInterval(intervalId);
+  }, [recording, fetchRecording]);
   
   // Format date
   const formatDate = (dateString: string) => {
@@ -139,27 +191,50 @@ export default function RecordingDetailPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ recordingId: recording.id }),
+        body: JSON.stringify({ 
+          recordingId: recording.id,
+          language: 'en',
+          modelId: 'scribe_v1',
+          diarize: true
+        }),
       });
       
       if (!response.ok) {
-        throw new Error('Failed to request transcription');
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to request transcription');
       }
       
-      // Update recording status
-      setRecording(prev => prev ? {
-        ...prev,
-        status: 'PENDING_TRANSCRIPTION',
-        transcription: {
-          ...prev.transcription,
-          status: 'pending',
-          error: undefined
-        } as Transcription
-      } : null);
+      // Get the response data
+      const data = await response.json();
+      
+      if (data.success) {
+        // Immediately update the UI to show pending status
+        setRecording(prev => {
+          if (!prev) return null;
+          
+          return {
+            ...prev,
+            status: 'PENDING_TRANSCRIPTION',
+            transcription: {
+              id: data.transcription?.id || 'temp-id',
+              recordingId: prev.id,
+              status: 'pending',
+              language: 'en',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            } as Transcription
+          };
+        });
+        
+        // Set a timeout to fetch the updated recording after a short delay
+        setTimeout(() => {
+          fetchRecording();
+        }, 2000);
+      }
       
     } catch (err) {
       console.error('Error requesting transcription:', err);
-      setError('Failed to request transcription');
+      setError((err as Error).message || 'Failed to request transcription');
     } finally {
       setLoading(false);
     }
