@@ -1,3 +1,4 @@
+// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
@@ -8,16 +9,43 @@ datasource db {
 }
 
 model Recording {
-  id         String   @id @default(uuid())
-  filename   String
-  filepath   String
-  filesize   Int
-  contentHash String?  @unique // SHA-256 hash for deduplication
-  duration   String?
-  agent      String?  @default("Unassigned")
-  callType   String?  @default("Unclassified")
-  status     String   @default("processing") // processing, completed, error
-  source     String   @default("upload") // upload, s3
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-} 
+  id          String        @id @default(uuid())
+  filename    String
+  filepath    String
+  filesize    Int
+  contentHash String?       @unique // SHA-256 hash for deduplication
+  duration    String?
+  agent       String?       @default("Unassigned")
+  callType    String?       @default("Unclassified")
+  status      String        @default("processing") // processing, completed, error
+  source      String        @default("upload") // upload, s3
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  transcription Transcription?
+}
+
+model Transcription {
+  id            String      @id @default(uuid())
+  recordingId   String      @unique
+  recording     Recording   @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  status        String      @default("pending") // pending, processing, completed, error
+  text          String?     @db.Text
+  language      String      @default("en")
+  speakers      Int?
+  processingTime Int?       // Time taken to transcribe in seconds
+  modelId       String?     // The model used for transcription
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  error         String?     @db.Text
+}
+
+model TranscriptionSettings {
+  id            String      @id @default(uuid())
+  apiKey        String
+  modelId       String      @default("scribe_v1")
+  language      String      @default("en")
+  active        Boolean     @default(true)
+  batchSize     Int         @default(5)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
