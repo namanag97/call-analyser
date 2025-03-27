@@ -28,6 +28,14 @@ interface Transcription {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  segments?: TranscriptionSegment[];
+}
+
+interface TranscriptionSegment {
+  speaker: string;
+  start_seconds: number;
+  end_seconds: number;
+  text: string;
 }
 
 interface Recording {
@@ -360,13 +368,33 @@ export default function RecordingDetailPage() {
                       </dl>
                     </div>
                     
-                    <div className="mt-4 bg-white border border-gray-100 rounded-md p-4">
-                      <div className="prose max-w-none">
-                        {recording.transcription.text.split('\n').map((line, i) => (
-                          <p key={i} className="mb-2">{line}</p>
-                        ))}
+                    {/* Check if we have segments to display */}
+                    {recording.transcription.segments && recording.transcription.segments.length > 0 ? (
+                      <div className="mt-4 bg-white border border-gray-100 rounded-md p-4">
+                        <div className="prose max-w-none space-y-4">
+                          {recording.transcription.segments.map((segment, index) => (
+                            <div key={index} className="p-2 rounded hover:bg-gray-50">
+                              <div className="flex items-start">
+                                <span className={`font-medium text-sm w-28 flex-shrink-0 ${
+                                  segment.speaker === 'speaker_1' ? 'text-blue-700' : 'text-green-700'
+                                }`}>
+                                  [{formatDuration(segment.start_seconds)}] {segment.speaker.replace('_', ' ')}:
+                                </span>
+                                <span className="flex-1">{segment.text}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="mt-4 bg-white border border-gray-100 rounded-md p-4">
+                        <div className="prose max-w-none">
+                          {recording.transcription.text.split('\n').map((line, i) => (
+                            <p key={i} className="mb-2">{line}</p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="text-center py-8">
