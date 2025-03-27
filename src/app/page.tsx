@@ -1,103 +1,227 @@
-import Image from "next/image";
+// src/app/page.tsx
+'use client';
 
-export default function Home() {
+import React, { useState, useEffect } from 'react';
+import Sidebar from '@/components/Sidebar';
+import RecordingFilters from '@/components/RecordingFilters';
+import RecordingsList from '@/components/RecordingsList';
+import { GetRecordingsResult } from '@/core/domain/ports/in/GetRecordingsUseCase';
+
+export default function HomePage() {
+  const [recordings, setRecordings] = useState<GetRecordingsResult>({
+    recordings: [],
+    totalCount: 0,
+    totalPages: 0,
+    currentPage: 1
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [filters, setFilters] = useState<{
+    agent?: string;
+    date?: string;
+  }>({});
+
+  // Fetch recordings when filters or page changes
+  useEffect(() => {
+    const fetchRecordings = async () => {
+      setLoading(true);
+      setError(null);
+      
+      try {
+        // Build query parameters
+        const params = new URLSearchParams({
+          page: currentPage.toString(),
+          limit: '20'
+        });
+        
+        if (filters.agent) {
+          params.append('agent', filters.agent);
+        }
+        
+        if (filters.date) {
+          params.append('date', filters.date);
+        }
+        
+        const response = await fetch(`/api/recordings?${params.toString()}`);
+        
+        if (!response.ok) {
+          throw new Error(`Error fetching recordings: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        setRecordings(data);
+      } catch (err) {
+        console.error('Failed to fetch recordings:', err);
+        setError('Failed to load recordings. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchRecordings();
+  }, [currentPage, filters]);
+
+  // Handle filter changes
+  const handleFilterChange = (newFilters: {
+    agent?: string;
+    date?: string;
+  }) => {
+    setFilters(newFilters);
+    setCurrentPage(1); // Reset to first page when filters change
+  };
+
+  // Handle page changes
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+  };
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <Sidebar />
+      
+      {/* Main content */}
+      <div className="flex-1 overflow-auto">
+        {/* Header */}
+        <div className="bg-white shadow-sm p-4">
+          <div className="flex justify-between items-center">
+            <h1 className="text-xl font-semibold text-gray-800">
+              Call Recordings
+            </h1>
+            
+            {/* Filters */}
+            <RecordingFilters onFilterChange={handleFilterChange} />
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+        
+        {/* Recordings list */}
+        <div className="p-4">
+          {loading ? (
+            <div className="text-center py-10">
+              <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-indigo-600 border-r-transparent"></div>
+              <p className="mt-2 text-gray-600">Loading recordings...</p>
+            </div>
+          ) : error ? (
+            <div className="text-center py-10 text-red-500">
+              {error}
+            </div>
+          ) : (
+            <RecordingsList
+              recordings={recordings.recordings}
+              totalCount={recordings.totalCount}
+              totalPages={recordings.totalPages}
+              currentPage={recordings.currentPage}
+              onPageChange={handlePageChange}
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
+
+// src/app/uploads/page.tsx
+'use client';
+
+import React, { useState } from 'react';
+import Sidebar from '@/components/Sidebar';
+import UploadForm from '@/components/UploadForm';
+import { useRouter, useSearchParams } from 'next/navigation';
+
+export default function UploadsPage() {
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialSource = searchParams.get('source') === 's3' ? 's3' : 'upload';
+
+  // Handle file upload
+  const handleFileUpload = async (file: File) => {
+    try {
+      setUploadError(null);
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('source', 'upload');
+      
+      const response = await fetch('/api/recordings', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to upload file');
+      }
+      
+      // Optionally redirect to recordings list after successful upload
+      // router.push('/');
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadError((error as Error).message || 'Failed to upload file');
+      throw error; // Re-throw to let the component handle it
+    }
+  };
+
+  // Handle S3 import
+  const handleS3Import = async (s3Key: string) => {
+    try {
+      setUploadError(null);
+      
+      const formData = new FormData();
+      formData.append('source', 's3');
+      formData.append('s3Key', s3Key);
+      
+      const response = await fetch('/api/recordings', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to import from S3');
+      }
+      
+      // Optionally redirect to recordings list after successful upload
+      // router.push('/');
+    } catch (error) {
+      console.error('S3 import error:', error);
+      setUploadError((error as Error).message || 'Failed to import from S3');
+      throw error; // Re-throw to let the component handle it
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <Sidebar />
+      
+      {/* Main content */}
+      <div className="flex-1 overflow-auto">
+        {/* Header */}
+        <div className="bg-white shadow-sm p-4">
+          <div className="flex justify-between items-center">
+            <h1 className="text-xl font-semibold text-gray-800">
+              Upload Call Recordings
+            </h1>
+          </div>
+        </div>
+        
+        {/* Upload form */}
+        <div className="p-4">
+          {uploadError && (
+            <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+              {uploadError}
+            </div>
+          )}
+          
+          <UploadForm 
+            onUpload={handleFileUpload}
+            onS3Import={handleS3Import}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
