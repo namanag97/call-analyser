@@ -7,7 +7,7 @@ process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/call_a
 process.env.ELEVENLABS_API_KEY = 'test-api-key';
 process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:3000';
 
-// Mock Next.js components and functions
+// Mock Next.js components and hooks
 jest.mock('next/navigation', () => {
   return {
     useRouter: jest.fn().mockReturnValue({
@@ -36,11 +36,8 @@ jest.mock('next/navigation', () => {
 // Mock Next.js image component
 jest.mock('next/image', () => ({
   __esModule: true,
-  default: (props) => {
-    // eslint-disable-next-line @next/next/no-img-element
-    return <img {...props} alt={props.alt || ''} />;
-  }
+  default: 'mockNextImage'
 }));
 
-// Add @testing-library/jest-dom matchers
+// Import @testing-library/jest-dom matchers if you're using them
 require('@testing-library/jest-dom');

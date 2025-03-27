@@ -1,3 +1,8 @@
+/**
+ * @jest-environment jsdom
+ * Tests for UploadForm component
+ */
+
 // src/__tests__/components/UploadForm.test.tsx
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
