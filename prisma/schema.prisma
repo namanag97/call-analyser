@@ -12,6 +12,7 @@ model Recording {
   filename   String
   filepath   String
   filesize   Int
+  contentHash String?  @unique // SHA-256 hash for deduplication
   duration   String?
   agent      String?  @default("Unassigned")
   callType   String?  @default("Unclassified")

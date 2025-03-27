@@ -1,3 +1,4 @@
+// File storage adapter fix
 // src/adapters/out/storage/LocalFileStorageRepository.ts
 import { FileStorageRepository } from '@/core/domain/ports/out/FileStorageRepository';
 import * as fs from 'fs';
@@ -24,15 +25,25 @@ export class LocalFileStorageRepository implements FileStorageRepository {
   }
 
   async saveFile(filename: string, buffer: Buffer): Promise<string> {
-    // Generate a unique filename to prevent collisions
-    const uniqueFilename = `${Date.now()}-${filename}`;
-    const filepath = path.join(this.basePath, uniqueFilename);
-    
-    // Write the file to disk
-    await writeFileAsync(filepath, buffer);
-    
-    // Return the relative path for storage in the database
-    return `/uploads/${uniqueFilename}`;
+    try {
+      // Generate a unique filename to prevent collisions
+      const uniqueFilename = `${Date.now()}-${filename}`;
+      const relativePath = `/uploads/${uniqueFilename}`;
+      const absolutePath = path.join(process.cwd(), 'public', 'uploads', uniqueFilename);
+      
+      // Ensure directory exists
+      await this.ensureDirectoryExists(path.dirname(absolutePath));
+      
+      // Convert Buffer to Uint8Array for TypeScript compatibility
+      const uint8Array = new Uint8Array(buffer);
+      await writeFileAsync(absolutePath, uint8Array);
+      
+      // Return the relative path for storage in the database
+      return relativePath;
+    } catch (error) {
+      console.error('Error saving file:', error);
+      throw error;
+    }
   }
 
   getFileUrl(filepath: string): string {

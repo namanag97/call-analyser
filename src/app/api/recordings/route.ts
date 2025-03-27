@@ -1,15 +1,16 @@
 // src/app/api/recordings/route.ts
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { RecordingController } from '@/adapters/in/web/RecordingController';
 import { GetRecordingsUseCaseImpl } from '@/core/application/usecases/GetRecordingsUseCaseImpl';
 import { UploadRecordingUseCaseImpl } from '@/core/application/usecases/UploadRecordingUseCaseImpl';
 import { PrismaRecordingRepository } from '@/adapters/out/persistence/PrismaRecordingRepository';
 import { LocalFileStorageRepository } from '@/adapters/out/storage/LocalFileStorageRepository';
+import path from 'path';
 
 // Initialize dependencies
 const recordingRepository = new PrismaRecordingRepository();
 const fileStorageRepository = new LocalFileStorageRepository(
-  process.env.UPLOAD_DIR || './public/uploads',
+  path.join(process.cwd(), 'public', 'uploads'),
   process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
 );
 

@@ -28,8 +28,11 @@ export class LocalFileStorageService implements FileStorageRepository {
     const uniqueFilename = `${Date.now()}-${filename}`;
     const filepath = path.join(this.basePath, uniqueFilename);
     
+    // Convert Buffer to Uint8Array for TypeScript compatibility
+    const uint8Array = new Uint8Array(buffer);
+    
     // Write the file to disk
-    await writeFileAsync(filepath, buffer);
+    await writeFileAsync(filepath, uint8Array);
     
     // Return the relative path for storage in the database
     return `/uploads/${uniqueFilename}`;

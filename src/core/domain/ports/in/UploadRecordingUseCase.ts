@@ -1,3 +1,5 @@
+import { Recording } from "../../entities/Recording";
+
 export interface RecordingUploadDto {
   filename: string;
   filesize: number;

@@ -1,13 +1,23 @@
 // src/adapters/in/web/RecordingController.ts
+
 import { NextRequest, NextResponse } from 'next/server';
 import { 
   GetRecordingsUseCase,
-  GetRecordingsQuery
+  GetRecordingsQuery,
+  GetRecordingsFilter
 } from '@/core/domain/ports/in/GetRecordingsUseCase';
 import { 
   UploadRecordingUseCase, 
   RecordingUploadDto 
 } from '@/core/domain/ports/in/UploadRecordingUseCase';
+import { Recording } from '@/core/domain/entities/Recording';
+
+interface UploadResult {
+  success: boolean;
+  filename: string;
+  error?: string;
+  recording?: Recording;
+}
 
 export class RecordingController {
   constructor(
@@ -22,7 +32,8 @@ export class RecordingController {
     const limit = parseInt(searchParams.get('limit') || '20');
     
     // Build filter from query params
-    const filter: any = {};
+    const filter: GetRecordingsFilter = {};
+    
     const agent = searchParams.get('agent');
     const date = searchParams.get('date');
     const status = searchParams.get('status');
@@ -75,32 +86,85 @@ export class RecordingController {
   async uploadRecording(req: NextRequest): Promise<NextResponse> {
     try {
       const formData = await req.formData();
-      const file = formData.get('file') as File;
+      const files = formData.getAll('file') as File[] | null;
       const source = formData.get('source') as string || 'upload';
       const s3Key = formData.get('s3Key') as string;
       
-      if (!file && !s3Key) {
+      // Handle S3 import
+      if (s3Key) {
+        const dto: RecordingUploadDto = {
+          filename: `s3-file-${Date.now()}.aac`,
+          filesize: 0,
+          source: 's3',
+          s3Key: s3Key
+        };
+        
+        const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+        return NextResponse.json(recording);
+      }
+      
+      // Handle file upload(s)
+      if (!files || files.length === 0) {
         return NextResponse.json(
-          { error: 'No file or S3 key provided' },
+          { error: 'No file provided' },
           { status: 400 }
         );
       }
       
-      const dto: RecordingUploadDto = {
-        filename: file ? file.name : `s3-file-${Date.now()}.aac`,
-        filesize: file ? file.size : 0,
-        source: source as 'upload' | 's3',
-      };
-      
-      if (file) {
-        const arrayBuffer = await file.arrayBuffer();
-        dto.fileBuffer = Buffer.from(arrayBuffer);
-      } else if (s3Key) {
-        dto.s3Key = s3Key;
+      // Process a single file
+      if (files.length === 1) {
+        const file = files[0];
+        const dto: RecordingUploadDto = {
+          filename: file.name,
+          filesize: file.size,
+          source: source as 'upload' | 's3',
+        };
+        
+        // Convert File to Buffer
+        const bytes = await file.arrayBuffer();
+        dto.fileBuffer = Buffer.from(bytes);
+        
+        const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+        return NextResponse.json(recording);
       }
       
-      const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
-      return NextResponse.json(recording);
+      // Process multiple files in parallel (batch upload)
+      const uploadPromises = files.map(async (file) => {
+        try {
+          const dto: RecordingUploadDto = {
+            filename: file.name,
+            filesize: file.size,
+            source: source as 'upload' | 's3',
+          };
+          
+          // Convert File to Buffer
+          const bytes = await file.arrayBuffer();
+          dto.fileBuffer = Buffer.from(bytes);
+          
+          const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+          return {
+            success: true,
+            filename: file.name,
+            recording
+          } as UploadResult;
+        } catch (error) {
+          console.error(`Error processing file ${file.name}:`, error);
+          return {
+            success: false,
+            filename: file.name,
+            error: `Failed to upload ${file.name}`
+          } as UploadResult;
+        }
+      });
+      
+      const results = await Promise.all(uploadPromises);
+      return NextResponse.json({
+        totalFiles: files.length,
+        successCount: results.filter(r => r.success).length,
+        failureCount: results.filter(r => !r.success).length,
+        results
+      });
+      
     } catch (error) {
       console.error('Error uploading recording:', error);
       return NextResponse.json(

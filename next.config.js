@@ -1,3 +1,4 @@
+// Updated config with fixed experimental flag
 // next.config.js
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -7,9 +8,9 @@ const nextConfig = {
   images: {
     domains: [],
   },
-  // Enable experimental serverActions if using newer Next.js features
+  // Remove the serverActions flag as it's now default in Next.js 14
   experimental: {
-    serverActions: true,
+    // serverActions: true, // This was causing the warning
   },
 };
 

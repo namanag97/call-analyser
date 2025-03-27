@@ -1,4 +1,6 @@
 // src/core/domain/ports/in/GetRecordingsUseCase.ts
+import { Recording } from "../../entities/Recording";
+
 export interface GetRecordingsFilter {
   agent?: string;
   date?: Date;

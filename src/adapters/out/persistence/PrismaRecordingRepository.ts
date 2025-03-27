@@ -8,6 +8,7 @@ import {
   GetRecordingsResult 
 } from '@/core/domain/ports/in/GetRecordingsUseCase';
 import { Recording } from '@/core/domain/entities/Recording';
+import { Prisma } from '@prisma/client';
 
 export class PrismaRecordingRepository implements RecordingRepository {
   async findAll(query: GetRecordingsQuery): Promise<GetRecordingsResult> {
@@ -15,7 +16,7 @@ export class PrismaRecordingRepository implements RecordingRepository {
     const skip = (page - 1) * limit;
     
     // Build where conditions from filter
-    const where: any = {};
+    const where: Prisma.RecordingWhereInput = {};
     if (filter) {
       if (filter.agent) {
         where.agent = { contains: filter.agent };
@@ -76,7 +77,8 @@ export class PrismaRecordingRepository implements RecordingRepository {
   }
   
   async update(id: string, data: Partial<Recording>): Promise<Recording> {
-    const { createdAt, updatedAt, id: recordingId, ...updateData } = data as any;
+    // Destructure unwanted properties from data object using underscore prefix to show intentional non-use
+    const { createdAt: _createdAt, updatedAt: _updatedAt, id: _recordingId, ...updateData } = data;
     
     const updatedRecording = await prisma.recording.update({
       where: { id },
@@ -84,5 +86,11 @@ export class PrismaRecordingRepository implements RecordingRepository {
     });
     
     return updatedRecording as unknown as Recording;
+  }
+
+  async delete(id: string): Promise<void> {
+    await prisma.recording.delete({
+      where: { id }
+    });
   }
 }
