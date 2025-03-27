@@ -1,7 +1,7 @@
 // src/components/RecordingsList.tsx
 import React, { useState } from 'react';
 import { Play, Pause, Download, Clock, CheckCircle, AlertCircle } from 'lucide-react';
-import { Recording } from '@/core/domain/entities/Recording';
+import { Recording, RecordingStatus } from '@/core/domain/entities/Recording';
 
 interface RecordingsListProps {
   recordings: Recording[];
@@ -30,8 +30,8 @@ const RecordingsList: React.FC<RecordingsListProps> = ({
   };
 
   // Format date
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+  const formatDate = (dateString: string | Date) => {
+    const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
@@ -47,14 +47,18 @@ const RecordingsList: React.FC<RecordingsListProps> = ({
   // Render status icon
   const renderStatusIcon = (status: string) => {
     switch (status) {
-      case 'processing':
+      case 'UPLOADED':
+      case 'PENDING_TRANSCRIPTION':
         return <Clock className="h-5 w-5 text-blue-500" />;
-      case 'completed':
+      case 'TRANSCRIBING':
+        return <Clock className="h-5 w-5 text-yellow-500" />;
+      case 'COMPLETED':
         return <CheckCircle className="h-5 w-5 text-green-500" />;
-      case 'error':
+      case 'FAILED_TRANSCRIPTION':
+      case 'DUPLICATE':
         return <AlertCircle className="h-5 w-5 text-red-500" />;
       default:
-        return <Clock className="h-5 w-5 text-yellow-500" />;
+        return <Clock className="h-5 w-5 text-gray-500" />;
     }
   };
 
@@ -92,26 +96,26 @@ const RecordingsList: React.FC<RecordingsListProps> = ({
                       <div className="text-sm text-gray-900">{recording.agent}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-500">{formatDate(recording.createdAt.toString())}</div>
+                      <div className="text-sm text-gray-500">{formatDate(recording.createdAt)}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {recording.duration || '0:00'}
+                      {recording.duration ? `${Math.floor(recording.duration / 60)}:${(recording.duration % 60).toString().padStart(2, '0')}` : '0:00'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {formatFileSize(recording.filesize)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        recording.source === 's3' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'
+                        recording.source === 'S3' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'
                       }`}>
-                        {recording.source === 's3' ? 'S3' : 'Upload'}
+                        {recording.source}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
                         {renderStatusIcon(recording.status)}
                         <span className="ml-2 text-sm capitalize text-gray-700">
-                          {recording.status}
+                          {recording.status.replace(/_/g, ' ').toLowerCase()}
                         </span>
                       </div>
                     </td>
@@ -120,7 +124,7 @@ const RecordingsList: React.FC<RecordingsListProps> = ({
                         <button 
                           onClick={() => togglePlayPause(recording.id)}
                           className={`text-gray-600 hover:text-gray-900`}
-                          disabled={recording.status === 'processing'}
+                          disabled={recording.status === 'UPLOADED' || recording.status === 'PENDING_TRANSCRIPTION'}
                         >
                           {isPlayingId === recording.id ? 
                             <Pause className="h-5 w-5" /> : 
@@ -129,7 +133,7 @@ const RecordingsList: React.FC<RecordingsListProps> = ({
                         </button>
                         <button 
                           className="text-blue-600 hover:text-blue-900"
-                          disabled={recording.status === 'processing'}
+                          disabled={recording.status === 'UPLOADED' || recording.status === 'PENDING_TRANSCRIPTION'}
                         >
                           <Download className="h-5 w-5" />
                         </button>

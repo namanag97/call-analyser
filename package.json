@@ -14,6 +14,11 @@
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",
+    "bcryptjs": "^3.0.2",
+    "bullmq": "^5.45.0",
+    "elevenlabs": "^1.54.0",
+    "ioredis": "^5.6.0",
+    "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.356.0",
     "next": "^14.1.0",
     "react": "^18.2.0",
@@ -24,6 +29,8 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^20.11.19",
     "@types/react": "^18.2.57",
     "@types/react-dom": "^18.2.19",

@@ -1,5 +1,5 @@
 // src/app/api/recordings/route.ts
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { RecordingController } from '@/adapters/in/web/RecordingController';
 import { GetRecordingsUseCaseImpl } from '@/core/application/usecases/GetRecordingsUseCaseImpl';
 import { UploadRecordingUseCaseImpl } from '@/core/application/usecases/UploadRecordingUseCaseImpl';
@@ -28,9 +28,11 @@ const recordingController = new RecordingController(
 );
 
 export async function GET(req: NextRequest) {
+  // Note: We've removed the auth middleware for now as requested
   return recordingController.getRecordings(req);
 }
 
 export async function POST(req: NextRequest) {
+  // Note: We've removed the auth middleware for now as requested
   return recordingController.uploadRecording(req);
 }

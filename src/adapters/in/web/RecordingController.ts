@@ -10,7 +10,7 @@ import {
   UploadRecordingUseCase, 
   RecordingUploadDto 
 } from '@/core/domain/ports/in/UploadRecordingUseCase';
-import { Recording } from '@/core/domain/entities/Recording';
+import { Recording, RecordingStatus, RecordingSource } from '@/core/domain/entities/Recording';
 
 interface UploadResult {
   success: boolean;
@@ -41,8 +41,15 @@ export class RecordingController {
     
     if (agent) filter.agent = agent;
     if (date) filter.date = new Date(date);
-    if (status) filter.status = status;
-    if (source) filter.source = source;
+    
+    // Handle enum values for status and source
+    if (status && Object.values(RecordingStatus).includes(status as RecordingStatus)) {
+      filter.status = status as RecordingStatus;
+    }
+    
+    if (source && Object.values(RecordingSource).includes(source as RecordingSource)) {
+      filter.source = source as RecordingSource;
+    }
     
     const query: GetRecordingsQuery = {
       page,
@@ -52,7 +59,25 @@ export class RecordingController {
     
     try {
       const result = await this.getRecordingsUseCase.getRecordings(query);
-      return NextResponse.json(result);
+      
+      // For public API, return only necessary fields
+      const simplifiedRecordings = result.recordings.map(recording => ({
+        id: recording.id,
+        filename: recording.filename,
+        status: recording.status,
+        createdAt: recording.createdAt,
+        agent: recording.agent,
+        duration: recording.duration,
+        filesize: recording.filesize,
+        source: recording.source
+      }));
+      
+      return NextResponse.json({
+        recordings: simplifiedRecordings,
+        totalCount: result.totalCount,
+        totalPages: result.totalPages,
+        currentPage: result.currentPage
+      });
     } catch (error) {
       console.error('Error fetching recordings:', error);
       return NextResponse.json(
