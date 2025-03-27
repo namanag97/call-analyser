@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transcriptions - Simple UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .speaker-1-text { color: #1e40af; } /* blue-800 */
+        .speaker-2-text { color: #166534; } /* green-700 */
+        .speaker-unknown-text { color: #71717a; } /* zinc-500 */
+        .segment-current { background-color: #bfdbfe; /* blue-200 */ border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="flex h-screen">
+        <!-- Sidebar -->
+        <div class="w-64 bg-indigo-800 text-white p-4 flex flex-col space-y-2 flex-shrink-0">
+            <h1 class="text-xl font-bold mb-4">Call Analyzer</h1>
+            <a href="dashboard.html" class="flex items-center px-2 py-2 text-sm font-medium rounded-md text-indigo-100 hover:bg-indigo-700">[Home] Dashboard</a>
+            <a href="uploads.html" class="flex items-center px-2 py-2 text-sm font-medium rounded-md text-indigo-100 hover:bg-indigo-700">[Upload] Uploads</a>
+            <a href="#" class="flex items-center px-2 py-2 text-sm font-medium rounded-md bg-indigo-900">[FileText] Transcriptions</a>
+            <a href="#" class="flex items-center px-2 py-2 text-sm font-medium rounded-md text-indigo-100 hover:bg-indigo-700">[Settings] Settings</a>
+        </div>
+
+        <!-- Main Content -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <!-- Header -->
+            <header class="bg-white shadow-sm p-4 border-b border-gray-200 flex justify-between items-center">
+                <h1 class="text-xl font-semibold text-gray-900">Transcriptions</h1>
+                <div class="flex items-center space-x-4">
+                    <span class="text-sm inline-flex items-center">
+                        <span class="mr-1.5">[Spinner]</span>
+                        Worker: <span class="font-medium ml-1 text-blue-600">Running</span>
+                    </span>
+                    <button title="Transcription Settings" class="p-2 rounded-md text-gray-500 hover:bg-gray-100">
+                        [Settings]
+                    </button>
+                </div>
+            </header>
+
+            <!-- Main Layout -->
+            <div class="flex-1 flex overflow-hidden">
+                <!-- Left Pane: Transcription List -->
+                <aside class="w-1/3 border-r border-gray-200 bg-white flex flex-col">
+                    <!-- Search/Filter -->
+                    <div class="p-4 border-b border-gray-200">
+                        <input type="text" placeholder="Search transcriptions..." class="w-full px-3 py-1.5 border border-gray-300 rounded-md text-sm">
+                        <div class="flex space-x-2 mt-2">
+                            <select class="text-xs border-gray-300 rounded-md flex-1">
+                                <option value="">All Statuses</option>
+                                <option value="completed">Completed</option>
+                                <option value="processing">Processing</option>
+                                <option value="pending">Pending</option>
+                                <option value="error">Error</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- List -->
+                    <div class="flex-1 overflow-y-auto p-2 space-y-2">
+                        <!-- Transcription Item -->
+                        <div class="block p-3 rounded-lg cursor-pointer border border-indigo-300 bg-indigo-50 hover:bg-indigo-100">
+                            <div class="flex justify-between items-start mb-1">
+                                <span class="font-semibold text-sm text-gray-800 truncate pr-2">call_recording_01.wav</span>
+                                <span class="px-1.5 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-800">Completed</span>
+                            </div>
+                            <div class="text-xs text-gray-500">
+                                <div>Agent: John Smith</div>
+                                <div>Duration: 05:15</div>
+                                <div>Date: Oct 26, 2023 10:30</div>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- Right Pane: Transcription Detail -->
+                <main class="flex-1 flex flex-col bg-white">
+                    <!-- Detail Header -->
+                    <div class="p-4 border-b border-gray-200">
+                        <div class="flex justify-between items-center mb-2">
+                            <h2 class="text-lg font-semibold text-gray-900">call_recording_01.wav</h2>
+                            <div class="flex items-center space-x-2">
+                                <button title="Play/Pause" class="p-2 rounded-md hover:bg-gray-100">[Play]</button>
+                                <button title="Delete" class="p-2 rounded-md text-gray-500 hover:bg-gray-100 hover:text-red-600">[Trash]</button>
+                            </div>
+                        </div>
+                        <div class="text-sm text-gray-600">
+                            <span>Model: scribe_v1</span>
+                            <span class="mx-2">•</span>
+                            <span>Language: English</span>
+                            <span class="mx-2">•</span>
+                            <span>Processing Time: 15s</span>
+                        </div>
+                    </div>
+
+                    <!-- Transcription Text -->
+                    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                        <!-- Transcription Segment -->
+                        <div class="segment-current p-3 rounded">
+                            <div class="flex items-start">
+                                <span class="font-bold speaker-1-text text-sm w-24 flex-shrink-0">[0:01] Agent:</span>
+                                <span class="flex-1">Hello, thank you for calling Support. How can I help you today?</span>
+                            </div>
+                        </div>
+
+                        <!-- Another Segment -->
+                        <div class="p-3 rounded hover:bg-gray-50">
+                            <div class="flex items-start">
+                                <span class="font-bold speaker-2-text text-sm w-24 flex-shrink-0">[0:05] Customer:</span>
+                                <span class="flex-1">Hi, I'm having trouble logging into my account.</span>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden" id="settings-modal">
+        <div class="relative top-20 mx-auto p-5 border w-full max-w-xl shadow-lg rounded-md bg-white">
+            <div class="flex justify-between items-center pb-3 border-b">
+                <h3 class="text-lg font-medium text-gray-900">Transcription Settings</h3>
+                <button class="p-1 rounded-md hover:bg-gray-100" onclick="document.getElementById('settings-modal').classList.add('hidden')">
+                    [X]
+                </button>
+            </div>
+            <div class="mt-4 space-y-4">
+                <!-- API Key -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">ElevenLabs API Key</label>
+                    <input type="password" value="**********" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm">
+                </div>
+                <!-- Model Selection -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Model</label>
+                    <select class="mt-1 block w-full rounded-md border-gray-300 shadow-sm">
+                        <option value="scribe_v1">Scribe v1</option>
+                    </select>
+                </div>
+                <!-- Language -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Language</label>
+                    <select class="mt-1 block w-full rounded-md border-gray-300 shadow-sm">
+                        <option value="en">English</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html> 

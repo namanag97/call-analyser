@@ -1,0 +1,2497 @@
+// tailwind.config.js
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+    content: [
+      './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
+      './src/components/**/*.{js,ts,jsx,tsx,mdx}',
+      './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    ],
+    theme: {
+      extend: {},
+    },
+    plugins: [],
+  };
+  // Updated config with fixed experimental flag
+// next.config.js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  swcMinify: true,
+  reactStrictMode: true,
+  // Optional: Configure image domains if needed
+  images: {
+    domains: [],
+  },
+  // Remove the serverActions flag as it's now default in Next.js 14
+  experimental: {
+    // serverActions: true, // This was causing the warning
+  },
+};
+
+module.exports = nextConfig;
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Recording {
+  id          String        @id @default(uuid())
+  filename    String
+  filepath    String
+  filesize    Int
+  contentHash String?       @unique // SHA-256 hash for deduplication
+  duration    String?
+  agent       String?       @default("Unassigned")
+  callType    String?       @default("Unclassified")
+  status      String        @default("processing") // processing, completed, error
+  source      String        @default("upload") // upload, s3
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  transcription Transcription?
+}
+
+model Transcription {
+  id            String      @id @default(uuid())
+  recordingId   String      @unique
+  recording     Recording   @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  status        String      @default("pending") // pending, processing, completed, error
+  text          String?     @db.Text
+  language      String      @default("en")
+  speakers      Int?
+  processingTime Int?       // Time taken to transcribe in seconds
+  modelId       String?     // The model used for transcription
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  error         String?     @db.Text
+}
+
+model TranscriptionSettings {
+  id            String      @id @default(uuid())
+  apiKey        String
+  modelId       String      @default("scribe_v1")
+  language      String      @default("en")
+  active        Boolean     @default(true)
+  batchSize     Int         @default(5)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+} import os
+import csv
+import glob
+import pandas as pd
+import signal
+import sys
+from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
+from datetime import datetime, timedelta
+from pydub import AudioSegment
+from tqdm import tqdm
+import logging
+import threading
+import time
+
+# Configure logging with rotating file handler
+import logging.handlers
+from pathlib import Path
+
+# Create logs directory if it doesn't exist
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+
+# Configure session-based logging
+log_filename = f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+log_path = logs_dir / log_filename
+
+# Set up rotating file handler to prevent log files from growing too large
+file_handler = logging.handlers.RotatingFileHandler(
+    log_path,
+    maxBytes=10_000_000,  # 10MB
+    backupCount=10
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Global variables for tracking progress
+session_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+session_log_file = f"transcription_session_{session_id}.log"
+total_files = 0
+current_file_index = 0
+current_batch = 0
+total_batches = 0
+start_time = None
+is_exiting = False
+progress_thread = None
+
+def setup_environment():
+    """Set up environment variables and initialize the ElevenLabs client."""
+    try:
+        # Load environment variables
+        load_dotenv()
+        
+        # Get API key
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise ValueError("ELEVENLABS_API_KEY environment variable not found")
+        
+        # Initialize ElevenLabs client
+        client = ElevenLabs(api_key=api_key)
+        return client
+    except Exception as e:
+        logger.error(f"Failed to set up environment: {str(e)}")
+        return None
+
+def get_audio_files(folder_path, supported_extensions=None):
+    """Get all audio files with supported extensions from the folder."""
+    if supported_extensions is None:
+        supported_extensions = [".aac", ".mp3", ".wav", ".m4a"]
+    
+    try:
+        if not os.path.exists(folder_path):
+            raise FileNotFoundError(f"Folder {folder_path} not found")
+        
+        files = []
+        for ext in supported_extensions:
+            files.extend(glob.glob(os.path.join(folder_path, f"*{ext}")))
+        
+        logger.info(f"Found {len(files)} audio files in {folder_path}")
+        return files
+    except Exception as e:
+        logger.error(f"Error finding audio files: {str(e)}")
+        return []
+
+def get_already_transcribed_files(csv_path):
+    """Get a list of file names that have already been transcribed."""
+    try:
+        if not os.path.exists(csv_path):
+            logger.info(f"No existing transcriptions file found at {csv_path}")
+            return []
+        
+        df = pd.read_csv(csv_path)
+        already_transcribed = df['file_name'].tolist()
+        logger.info(f"Found {len(already_transcribed)} already transcribed files")
+        return already_transcribed
+    except Exception as e:
+        logger.error(f"Error reading existing CSV: {str(e)}")
+        return []
+
+def transcribe_audio(client, file_path, language_code="hin"):
+    """Transcribe the audio file using ElevenLabs API."""
+    global current_file_index
+    
+    try:
+        file_name = os.path.basename(file_path)
+        logger.info(f"Transcribing: {file_name} ({current_file_index + 1}/{total_files})")
+        
+        # Get file metadata
+        file_date = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d')
+        
+        # Load the audio file
+        audio = AudioSegment.from_file(file_path)
+        duration = len(audio) / 1000  # Duration in seconds
+        
+        # Convert to WAV in memory
+        audio_data = audio.export(format="wav")
+        
+        # Transcribe the audio
+        transcription = client.speech_to_text.convert(
+            file=audio_data,
+            model_id="scribe_v1",
+            tag_audio_events=True,
+            language_code=language_code,
+            diarize=True,
+        )
+        
+        # Create a structured result
+        result = {
+            "file_name": file_name,
+            "file_date": file_date,
+            "duration_seconds": duration,
+            "transcription": transcription.text,
+            "speakers": len(set(segment.speaker for segment in transcription.segments)) if hasattr(transcription, 'segments') else 1
+        }
+        
+        logger.info(f"Successfully transcribed {file_name} ({duration:.1f} sec)")
+        current_file_index += 1
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error transcribing {file_path}: {str(e)}")
+        current_file_index += 1
+        return {
+            "file_name": os.path.basename(file_path),
+            "file_date": datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d'),
+            "duration_seconds": 0,
+            "transcription": f"ERROR: {str(e)}",
+            "speakers": 0
+        }
+
+def save_transcriptions(results, csv_path):
+    """Save transcription results to CSV file with version control and protection against data loss."""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    try:
+        # Create backup of existing file before making any changes
+        if os.path.exists(csv_path):
+            backup_dir = os.path.join(os.path.dirname(csv_path), "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            backup_file = os.path.join(
+                backup_dir, 
+                f"{os.path.basename(csv_path).split('.')[0]}_{timestamp}.csv"
+            )
+            
+            try:
+                # Create a backup copy of the original file
+                pd.read_csv(csv_path).to_csv(backup_file, index=False)
+                logger.info(f"Created backup of existing data at {backup_file}")
+            except Exception as backup_error:
+                logger.error(f"Failed to create backup of existing file: {str(backup_error)}")
+                # Don't proceed if we can't backup existing data
+                return False
+            
+            # Load existing data
+            try:
+                existing_df = pd.read_csv(csv_path)
+                new_df = pd.DataFrame(results)
+                
+                # Check for duplicates before combining
+                duplicate_files = set(existing_df['file_name']).intersection(set(new_df['file_name']))
+                if duplicate_files:
+                    logger.warning(f"Found {len(duplicate_files)} duplicate files. Using new transcriptions for these files.")
+                    # Remove duplicates from existing data
+                    existing_df = existing_df[~existing_df['file_name'].isin(duplicate_files)]
+                
+                # Combine with existing data
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            except Exception as e:
+                logger.error(f"Error processing existing data: {str(e)}")
+                return False
+        else:
+            combined_df = pd.DataFrame(results)
+        
+        # Write to a temporary file first to prevent corruption
+        temp_file = f"{csv_path}.temp"
+        combined_df.to_csv(temp_file, index=False)
+        
+        # If temporary write succeeds, rename to final file
+        if os.path.exists(temp_file):
+            if os.path.exists(csv_path):
+                os.replace(temp_file, csv_path)  # Atomic operation
+            else:
+                os.rename(temp_file, csv_path)
+            
+            logger.info(f"Successfully saved {len(results)} new transcriptions. Total records: {len(combined_df)}")
+            return True
+        else:
+            logger.error("Failed to write temporary file")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error saving transcriptions to CSV: {str(e)}")
+        
+        # Emergency backup - save new transcriptions to a separate file
+        try:
+            error_backup_path = f"new_transcriptions_{timestamp}.csv"
+            pd.DataFrame(results).to_csv(error_backup_path, index=False)
+            logger.info(f"Created emergency backup of new transcriptions at {error_backup_path}")
+        except Exception as backup_error:
+            logger.critical(f"Failed to create emergency backup: {str(backup_error)}")
+        
+        return False
+
+def estimate_completion_time(processed, total, elapsed_time):
+    """Estimate the remaining time to complete all transcriptions."""
+    if processed == 0 or elapsed_time == 0:
+        return "Calculating..."
+    
+    rate = processed / elapsed_time
+    remaining_files = total - processed
+    estimated_seconds = remaining_files / rate if rate > 0 else float('inf')
+    
+    if estimated_seconds == float('inf'):
+        return "Unknown"
+    
+    estimated_completion = datetime.now() + timedelta(seconds=estimated_seconds)
+    
+    if estimated_seconds < 60:
+        return f"About {int(estimated_seconds)} seconds (ETA: {estimated_completion.strftime('%H:%M:%S')})"
+    elif estimated_seconds < 3600:
+        return f"About {int(estimated_seconds / 60)} minutes (ETA: {estimated_completion.strftime('%H:%M:%S')})"
+    else:
+        hours = estimated_seconds / 3600
+        return f"About {hours:.1f} hours (ETA: {estimated_completion.strftime('%Y-%m-%d %H:%M:%S')})"
+
+def print_progress():
+    """Function to periodically print progress information."""
+    global is_exiting, start_time, current_file_index, total_files, current_batch, total_batches
+    
+    while not is_exiting:
+        if start_time is not None and current_file_index > 0:
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            estimated_remaining = estimate_completion_time(current_file_index, total_files, elapsed_time)
+            
+            progress_msg = (
+                f"\nProgress update: {current_file_index}/{total_files} files processed "
+                f"({current_file_index/total_files*100:.1f}%)\n"
+                f"Batch: {current_batch}/{total_batches}\n"
+                f"Elapsed time: {timedelta(seconds=int(elapsed_time))}\n"
+                f"Estimated remaining: {estimated_remaining}\n"
+            )
+            
+            print(progress_msg)
+            with open(session_log_file, 'a') as f:
+                f.write(f"\n--- PROGRESS UPDATE {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                f.write(progress_msg)
+                
+        time.sleep(30)  # Update every 30 seconds
+
+def signal_handler(sig, frame):
+    """Handle keyboard interrupts and termination signals with a graceful exit."""
+    global is_exiting
+    
+    if is_exiting:
+        print("\nForced exit! Some data may be lost.")
+        sys.exit(1)
+    
+    is_exiting = True
+    print("\n\nReceived termination signal. Finishing current transcription and saving progress...")
+    print("Press Ctrl+C again to force exit (not recommended - data may be lost)")
+    
+    # Continue execution - the main loop will check is_exiting and save progress
+
+def save_checkpoint(batch_results, output_csv, batch_num, force=False):
+    """Save the current progress as a checkpoint."""
+    if not batch_results and not force:
+        return
+    
+    # Save to main output if possible
+    if batch_results:
+        success = save_transcriptions(batch_results, output_csv)
+        if not success:
+            # Save to checkpoint file if main save fails
+            checkpoint_file = f"checkpoint_{session_id}_batch_{batch_num}.csv"
+            try:
+                pd.DataFrame(batch_results).to_csv(checkpoint_file, index=False)
+                logger.info(f"Saved checkpoint to {checkpoint_file}")
+            except Exception as e:
+                logger.critical(f"Failed to save checkpoint: {str(e)}")
+    
+    # Update session log with checkpoint information
+    with open(session_log_file, 'a') as f:
+        f.write(f"\n=== CHECKPOINT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        f.write(f"Files processed: {current_file_index}/{total_files}\n")
+        f.write(f"Batch: {batch_num}/{total_batches}\n")
+        if start_time:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            f.write(f"Elapsed time: {timedelta(seconds=int(elapsed))}\n")
+            
+            if current_file_index > 0:
+                est_remaining = estimate_completion_time(current_file_index, total_files, elapsed)
+                f.write(f"Estimated remaining: {est_remaining}\n")
+        
+        if is_exiting:
+            f.write("PROCESS INTERRUPTED BY USER - PARTIAL COMPLETION\n")
+
+def main():
+    """Main function to transcribe audio files and save results to CSV."""
+    global start_time, total_files, current_file_index, current_batch, total_batches, progress_thread, is_exiting
+    
+    # Set up signal handlers for graceful exit
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Configuration
+    INPUT_FOLDER = os.getenv("INPUT_FOLDER", "/Users/namanagarwal/voice call/clips")
+    OUTPUT_CSV = os.getenv("OUTPUT_CSV", "/Users/namanagarwal/voice call/call_transcriptions.csv")
+    LANGUAGE_CODE = os.getenv("LANGUAGE_CODE", "hin")  # Default to Hindi
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Process in batches to save progress frequently
+    
+    # Create a session identifier for this run
+    logger.info(f"Starting transcription process - Session ID: {session_id}")
+    
+    # Start progress tracking thread
+    progress_thread = threading.Thread(target=print_progress, daemon=True)
+    progress_thread.start()
+    
+    try:
+        # Setup environment and client
+        client = setup_environment()
+        if not client:
+            logger.error("Failed to initialize ElevenLabs client. Exiting.")
+            return
+        
+        # Get audio files
+        audio_files = get_audio_files(INPUT_FOLDER)
+        if not audio_files:
+            logger.warning(f"No audio files found in {INPUT_FOLDER}")
+            return
+        
+        # Get already transcribed files
+        already_transcribed = get_already_transcribed_files(OUTPUT_CSV)
+        
+        # Filter out files that have already been transcribed
+        files_to_transcribe = [f for f in audio_files if os.path.basename(f) not in already_transcribed]
+        logger.info(f"Found {len(files_to_transcribe)} new files to transcribe")
+        
+        if not files_to_transcribe:
+            logger.info("No new files to transcribe")
+            return
+        
+        # Set global counters for progress tracking
+        total_files = len(files_to_transcribe)
+        current_file_index = 0
+        total_batches = (total_files - 1) // BATCH_SIZE + 1
+        
+        # Create session log file to track progress
+        with open(session_log_file, 'w') as f:
+            f.write(f"Session started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Files to transcribe: {len(files_to_transcribe)}\n")
+            f.write(f"Total batches: {total_batches} (batch size: {BATCH_SIZE})\n\n")
+        
+        # Start timing
+        start_time = datetime.now()
+        
+        # Process files in batches to save progress periodically
+        total_processed = 0
+        total_successful = 0
+        total_failed = 0
+        
+        for i in range(0, len(files_to_transcribe), BATCH_SIZE):
+            # Check if exit was requested
+            if is_exiting:
+                logger.info("Exit requested. Stopping after current batch.")
+                break
+                
+            batch_files = files_to_transcribe[i:i+BATCH_SIZE]
+            current_batch = i//BATCH_SIZE + 1
+            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch_files)} files)")
+            
+            # Process batch
+            batch_results = []
+            batch_successful = 0
+            batch_failed = 0
+            
+            for file_path in tqdm(batch_files, desc=f"Batch {current_batch}/{total_batches}"):
+                # Check if exit was requested during processing
+                if is_exiting:
+                    logger.info("Exit requested. Finishing current file and saving progress.")
+                    # Continue with current file to complete it, then break the loop
+                
+                try:
+                    result = transcribe_audio(client, file_path, LANGUAGE_CODE)
+                    if result:
+                        batch_results.append(result)
+                        if "ERROR:" not in result["transcription"]:
+                            batch_successful += 1
+                            # Log success
+                            with open(session_log_file, 'a') as f:
+                                f.write(f"SUCCESS: {os.path.basename(file_path)}\n")
+                        else:
+                            batch_failed += 1
+                            # Log failure
+                            with open(session_log_file, 'a') as f:
+                                f.write(f"FAILED: {os.path.basename(file_path)} - {result['transcription']}\n")
+                except Exception as e:
+                    logger.error(f"Unhandled exception processing {file_path}: {str(e)}")
+                    batch_failed += 1
+                    # Log exception
+                    with open(session_log_file, 'a') as f:
+                        f.write(f"EXCEPTION: {os.path.basename(file_path)} - {str(e)}\n")
+                
+                # If exit requested after processing current file, break
+                if is_exiting and total_processed < total_files - 1:
+                    break
+            
+            # Update totals
+            total_processed += len(batch_files)
+            total_successful += batch_successful
+            total_failed += batch_failed
+            
+            # Save batch results
+            if batch_results or is_exiting:
+                logger.info(f"Saving batch results: {len(batch_results)} transcriptions")
+                save_checkpoint(batch_results, OUTPUT_CSV, current_batch, force=is_exiting)
+            
+            # Log batch summary
+            logger.info(f"Batch {current_batch} complete: {batch_successful} successful, {batch_failed} failed")
+            with open(session_log_file, 'a') as f:
+                f.write(f"\nBatch {current_batch} summary: {batch_successful} successful, {batch_failed} failed\n\n")
+            
+            # If exiting, don't continue to next batch
+            if is_exiting:
+                break
+        
+        # Calculate elapsed time
+        elapsed = datetime.now() - start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed.total_seconds())))
+        
+        # Log final summary
+        logger.info(f"Transcription session {session_id} completed")
+        logger.info(f"Total files processed: {total_processed}/{total_files}")
+        logger.info(f"Successfully transcribed: {total_successful}")
+        logger.info(f"Failed transcriptions: {total_failed}")
+        logger.info(f"Total time: {elapsed_str}")
+        
+        with open(session_log_file, 'a') as f:
+            f.write(f"\n=== FINAL SUMMARY ===\n")
+            f.write(f"Session completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total files processed: {total_processed}/{total_files}")
+            if is_exiting:
+                f.write(" (PARTIAL - Process was interrupted)")
+            f.write("\n")
+            f.write(f"Successfully transcribed: {total_successful}\n")
+            f.write(f"Failed transcriptions: {total_failed}\n")
+            f.write(f"Total time: {elapsed_str}\n")
+        
+        if total_failed > 0:
+            logger.warning(f"Some transcriptions failed. See {session_log_file} for details.")
+        elif total_processed == total_files:
+            logger.info("All transcriptions completed successfully.")
+        else:
+            logger.info("Process was interrupted before completion.")
+            
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {str(e)}", exc_info=True)
+        
+        # Try to save emergency log
+        with open(f"emergency_log_{session_id}.txt", 'w') as f:
+            f.write(f"EMERGENCY LOG - CRITICAL ERROR at {datetime.now()}\n")
+            f.write(f"Error: {str(e)}\n")
+            f.write(f"Files processed: {current_file_index}/{total_files}\n")
+            f.write(f"Current batch: {current_batch}/{total_batches}\n")
+        
+        return 1
+    finally:
+        # Signal the progress thread to exit
+        is_exiting = True
+        if progress_thread and progress_thread.is_alive():
+            progress_thread.join(timeout=2)
+            
+        logger.info("Transcription process completed. Exit successful.")
+        return 0
+
+if __name__ == "__main__":
+    exit_code = 1
+    try:
+        exit_code = main()
+    except Exception as e:
+        logger.critical(f"Unhandled exception in script: {str(e)}", exc_info=True)
+    finally:
+        sys.exit(exit_code)import 'reflect-metadata';
+import { container } from 'tsyringe';
+import { Logger, ConsoleLogger } from './domain/ports/out/Logger';
+import { BaseRepository } from './domain/ports/out/BaseRepository';
+import { BaseService } from './domain/ports/in/BaseService';
+
+// Register core services
+container.registerSingleton<Logger>('Logger', ConsoleLogger);
+
+// Export the container for use in other parts of the application
+export { container }; // src/core/application/usecases/GetRecordingsUseCaseImpl.ts
+import { 
+  GetRecordingsUseCase, 
+  GetRecordingsQuery, 
+  GetRecordingsResult 
+} from '../../domain/ports/in/GetRecordingsUseCase';
+import { Recording } from '../../domain/entities/Recording';
+import { RecordingRepository } from '../../domain/ports/out/RecordingRepository';
+
+export class GetRecordingsUseCaseImpl implements GetRecordingsUseCase {
+  constructor(private recordingRepository: RecordingRepository) {}
+
+  async getRecordings(query: GetRecordingsQuery): Promise<GetRecordingsResult> {
+    return this.recordingRepository.findAll(query);
+  }
+
+  async getRecordingById(id: string): Promise<Recording | null> {
+    return this.recordingRepository.findById(id);
+  }
+}
+// src/core/application/usecases/UploadRecordingUseCaseImpl.ts
+import { 
+  UploadRecordingUseCase, 
+  RecordingUploadDto 
+} from '../../domain/ports/in/UploadRecordingUseCase';
+import { Recording } from '../../domain/entities/Recording';
+import { RecordingRepository } from '../../domain/ports/out/RecordingRepository';
+import { FileStorageRepository } from '../../domain/ports/out/FileStorageRepository';
+
+export class UploadRecordingUseCaseImpl implements UploadRecordingUseCase {
+  constructor(
+    private recordingRepository: RecordingRepository,
+    private fileStorageRepository: FileStorageRepository
+  ) {}
+
+  async uploadRecording(dto: RecordingUploadDto): Promise<Recording> {
+    let filepath: string;
+    
+    if (dto.source === 'upload' && dto.fileBuffer) {
+      // Save the file to storage
+      filepath = await this.fileStorageRepository.saveFile(dto.filename, dto.fileBuffer);
+    } else if (dto.source === 's3' && dto.s3Key) {
+      // For S3 source, we just store the S3 key
+      filepath = dto.s3Key;
+    } else {
+      throw new Error('Invalid upload data');
+    }
+
+    // Create recording entry in database
+    const recording = await this.recordingRepository.save({
+      filename: dto.filename,
+      filepath: filepath,
+      filesize: dto.filesize,
+      status: 'processing',
+      source: dto.source,
+      agent: 'Unassigned',
+      callType: 'Unclassified',
+    });
+
+    // In a real application, you might trigger an async processing job here
+    // to analyze the audio file and update the recording later
+
+    return recording;
+  }
+}
+// src/core/application/services/FileStorageService.ts
+import { FileStorageRepository } from '../../domain/ports/out/FileStorageRepository';
+import * as fs from 'fs';
+import * as path from 'path';
+import { promisify } from 'util';
+
+const writeFileAsync = promisify(fs.writeFile);
+const mkdirAsync = promisify(fs.mkdir);
+
+export class LocalFileStorageService implements FileStorageRepository {
+  constructor(private basePath: string, private baseUrl: string) {
+    // Ensure the upload directory exists
+    this.ensureDirectoryExists(basePath);
+  }
+
+  private async ensureDirectoryExists(dirPath: string): Promise<void> {
+    try {
+      await mkdirAsync(dirPath, { recursive: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+
+  async saveFile(filename: string, buffer: Buffer): Promise<string> {
+    // Generate a unique filename to prevent collisions
+    const uniqueFilename = `${Date.now()}-${filename}`;
+    const filepath = path.join(this.basePath, uniqueFilename);
+    
+    // Convert Buffer to Uint8Array for TypeScript compatibility
+    const uint8Array = new Uint8Array(buffer);
+    
+    // Write the file to disk
+    await writeFileAsync(filepath, uint8Array);
+    
+    // Return the relative path for storage in the database
+    return `/uploads/${uniqueFilename}`;
+  }
+
+  getFileUrl(filepath: string): string {
+    return `${this.baseUrl}${filepath}`;
+  }
+}import { Recording } from "../../domain/entities/Recording";
+import { RecordingRepository } from "../../domain/ports/out/RecordingRepository";
+import { GetRecordingsQuery } from "../../domain/ports/in/GetRecordingsUseCase";
+
+export class RecordingService {
+  constructor(private readonly recordingRepository: RecordingRepository) {}
+
+  async getAllRecordings(query: GetRecordingsQuery = { page: 1, limit: 20 }): Promise<Recording[]> {
+    const result = await this.recordingRepository.findAll(query);
+    return result.recordings;
+  }
+
+  async getRecordingById(id: string): Promise<Recording | null> {
+    return this.recordingRepository.findById(id);
+  }
+
+  async saveRecording(recording: Recording): Promise<Recording> {
+    return this.recordingRepository.save(recording);
+  }
+
+  async updateRecording(id: string, data: Partial<Recording>): Promise<Recording> {
+    return this.recordingRepository.update(id, data);
+  }
+
+  async deleteRecording(id: string): Promise<void> {
+    return this.recordingRepository.delete(id);
+  }
+} export class AppError extends Error {
+  constructor(
+    public statusCode: number,
+    public code: string,
+    message: string,
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message: string, details?: any) {
+    super(400, 'VALIDATION_ERROR', message, details);
+    this.name = 'ValidationError';
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(message: string) {
+    super(404, 'NOT_FOUND', message);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class UnauthorizedError extends AppError {
+  constructor(message: string = 'Unauthorized') {
+    super(401, 'UNAUTHORIZED', message);
+    this.name = 'UnauthorizedError';
+  }
+}
+
+export class ForbiddenError extends AppError {
+  constructor(message: string = 'Forbidden') {
+    super(403, 'FORBIDDEN', message);
+    this.name = 'ForbiddenError';
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(409, 'CONFLICT', message);
+    this.name = 'ConflictError';
+  }
+}
+
+export class InternalServerError extends AppError {
+  constructor(message: string = 'Internal Server Error') {
+    super(500, 'INTERNAL_SERVER_ERROR', message);
+    this.name = 'InternalServerError';
+  }
+} import { Recording } from "../../entities/Recording";
+import { GetRecordingsQuery, GetRecordingsResult } from "../in/GetRecordingsUseCase";
+
+export interface RecordingRepository {
+  findAll(query: GetRecordingsQuery): Promise<GetRecordingsResult>;
+  findById(id: string): Promise<Recording | null>;
+  save(recording: Omit<Recording, 'id' | 'createdAt' | 'updatedAt'>): Promise<Recording>;
+  update(id: string, data: Partial<Recording>): Promise<Recording>;
+  delete(id: string): Promise<void>;
+}
+// src/core/domain/ports/out/FileStorageRepository.ts
+export interface FileStorageRepository {
+    saveFile(filename: string, buffer: Buffer): Promise<string>; // Returns filepath
+    getFileUrl(filepath: string): string;
+  }import { injectable } from 'tsyringe';
+
+export enum LogLevel {
+  DEBUG = 'debug',
+  INFO = 'info',
+  WARN = 'warn',
+  ERROR = 'error',
+}
+
+export interface LogContext {
+  [key: string]: any;
+}
+
+@injectable()
+export interface Logger {
+  debug(message: string, context?: LogContext): void;
+  info(message: string, context?: LogContext): void;
+  warn(message: string, context?: LogContext): void;
+  error(message: string, error?: Error, context?: LogContext): void;
+}
+
+@injectable()
+export class ConsoleLogger implements Logger {
+  private formatMessage(level: LogLevel, message: string, context?: LogContext): string {
+    const timestamp = new Date().toISOString();
+    const contextStr = context ? ` ${JSON.stringify(context)}` : '';
+    return `[${timestamp}] ${level.toUpperCase()}: ${message}${contextStr}`;
+  }
+
+  debug(message: string, context?: LogContext): void {
+    console.debug(this.formatMessage(LogLevel.DEBUG, message, context));
+  }
+
+  info(message: string, context?: LogContext): void {
+    console.info(this.formatMessage(LogLevel.INFO, message, context));
+  }
+
+  warn(message: string, context?: LogContext): void {
+    console.warn(this.formatMessage(LogLevel.WARN, message, context));
+  }
+
+  error(message: string, error?: Error, context?: LogContext): void {
+    const errorContext = error ? { ...context, error: error.message, stack: error.stack } : context;
+    console.error(this.formatMessage(LogLevel.ERROR, message, errorContext));
+  }
+} import { injectable } from 'tsyringe';
+
+export interface PaginationParams {
+  page: number;
+  limit: number;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+@injectable()
+export interface BaseRepository<T> {
+  findById(id: string): Promise<T | null>;
+  findAll(params?: PaginationParams): Promise<PaginatedResult<T>>;
+  create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<T>;
+  update(id: string, data: Partial<T>): Promise<T>;
+  delete(id: string): Promise<void>;
+  exists(id: string): Promise<boolean>;
+} import { injectable } from 'tsyringe';
+import { PaginatedResult } from '../out/BaseRepository';
+
+@injectable()
+export interface BaseService<T> {
+  getById(id: string): Promise<T | null>;
+  getAll(page?: number, limit?: number): Promise<PaginatedResult<T>>;
+  create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<T>;
+  update(id: string, data: Partial<T>): Promise<T>;
+  delete(id: string): Promise<void>;
+  exists(id: string): Promise<boolean>;
+} // src/core/domain/ports/in/GetRecordingsUseCase.ts
+import { Recording } from "../../entities/Recording";
+
+export interface GetRecordingsFilter {
+  agent?: string;
+  date?: Date;
+  status?: string;
+  source?: string;
+}
+
+export interface GetRecordingsQuery {
+  page: number;
+  limit: number;
+  filter?: GetRecordingsFilter;
+}
+
+export interface GetRecordingsResult {
+  recordings: Recording[];
+  totalCount: number;
+  totalPages: number;
+  currentPage: number;
+}
+
+export interface GetRecordingsUseCase {
+  getRecordings(query: GetRecordingsQuery): Promise<GetRecordingsResult>;
+  getRecordingById(id: string): Promise<Recording | null>;
+}
+import { Recording } from "../../entities/Recording";
+
+export interface RecordingUploadDto {
+  filename: string;
+  filesize: number;
+  source: 'upload' | 's3';
+  fileBuffer?: Buffer;
+  s3Key?: string;
+}
+
+export interface UploadRecordingUseCase {
+  uploadRecording(dto: RecordingUploadDto): Promise<Recording>;
+}
+import { z } from 'zod';
+
+export const RecordingSchema = z.object({
+  id: z.string().uuid().optional(),
+  filename: z.string().min(1),
+  filepath: z.string().min(1),
+  filesize: z.number().positive(),
+  contentHash: z.string().min(1),
+  duration: z.number().positive(),
+  agent: z.string().min(1),
+  callType: z.string().min(1),
+  status: z.enum(['pending', 'processing', 'completed', 'failed']),
+  source: z.enum(['upload', 's3']),
+  createdAt: z.date().optional(),
+  updatedAt: z.date().optional(),
+});
+
+export const TranscriptionSchema = z.object({
+  id: z.string().uuid().optional(),
+  recordingId: z.string().uuid(),
+  status: z.enum(['pending', 'processing', 'completed', 'failed']),
+  text: z.string().optional(),
+  language: z.string().optional(),
+  speakers: z.number().int().positive().optional(),
+  processingTime: z.number().positive().optional(),
+  modelId: z.string().optional(),
+  createdAt: z.date().optional(),
+  updatedAt: z.date().optional(),
+  error: z.string().optional(),
+});
+
+export const TranscriptionSettingsSchema = z.object({
+  id: z.string().uuid().optional(),
+  language: z.string().min(1),
+  modelId: z.string().min(1),
+  maxSpeakers: z.number().int().positive(),
+  createdAt: z.date().optional(),
+  updatedAt: z.date().optional(),
+});
+
+export const TranscriptionWorkerSchema = z.object({
+  id: z.string().uuid().optional(),
+  status: z.enum(['idle', 'running', 'stopped', 'error']),
+  lastProcessedAt: z.date().optional(),
+  error: z.string().optional(),
+  createdAt: z.date().optional(),
+  updatedAt: z.date().optional(),
+});
+
+export type Recording = z.infer<typeof RecordingSchema>;
+export type Transcription = z.infer<typeof TranscriptionSchema>;
+export type TranscriptionSettings = z.infer<typeof TranscriptionSettingsSchema>;
+export type TranscriptionWorker = z.infer<typeof TranscriptionWorkerSchema>; // src/core/domain/entities/Recording.ts
+export interface Recording {
+    id: string;
+    filename: string;
+    filepath: string;
+    filesize: number;
+    duration?: string;
+    agent?: string;
+    callType?: string;
+    status: 'processing' | 'completed' | 'error';
+    source: 'upload' | 's3';
+    createdAt: Date;
+    updatedAt: Date;
+  }
+  'use client';
+
+import React, { useState } from 'react';
+import Sidebar from '@/components/Sidebar';
+import UploadForm from '@/components/UploadForm';
+import { useSearchParams } from 'next/navigation';
+import { AlertCircle, CheckCircle } from 'lucide-react';
+
+export default function UploadsPage() {
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [batchResults, setBatchResults] = useState<{
+    totalFiles: number;
+    successCount: number;
+    failureCount: number;
+    results: Array<{
+      success: boolean;
+      filename: string;
+      error?: string;
+    }>;
+  } | null>(null);
+  
+  const searchParams = useSearchParams();
+  // We'll check the source parameter but won't use it directly
+  searchParams.get('source'); // Just to check it exists
+  
+  // Handle file upload
+  const handleFileUpload = async (file: File) => {
+    try {
+      setUploadError(null);
+      setSuccessMessage(null);
+      setBatchResults(null);
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('source', 'upload');
+      
+      const response = await fetch('/api/recordings', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to upload file');
+      }
+      
+      await response.json(); // Process the response but not using the result
+      setSuccessMessage(`Successfully uploaded ${file.name}`);
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadError((error as Error).message || 'Failed to upload file');
+      throw error; // Re-throw to let the component handle it
+    }
+  };
+
+  // Handle S3 import
+  const handleS3Import = async (s3Key: string) => {
+    try {
+      setUploadError(null);
+      setSuccessMessage(null);
+      setBatchResults(null);
+      
+      const formData = new FormData();
+      formData.append('source', 's3');
+      formData.append('s3Key', s3Key);
+      
+      const response = await fetch('/api/recordings', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to import from S3');
+      }
+      
+      await response.json(); // Process the response but not using the result
+      setSuccessMessage(`Successfully imported file from S3: ${s3Key}`);
+    } catch (error) {
+      console.error('S3 import error:', error);
+      setUploadError((error as Error).message || 'Failed to import from S3');
+      throw error; // Re-throw to let the component handle it
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <Sidebar />
+      
+      {/* Main content */}
+      <div className="flex-1 overflow-auto">
+        {/* Header */}
+        <div className="bg-white shadow-sm p-4">
+          <div className="flex justify-between items-center">
+            <h1 className="text-xl font-semibold text-gray-800">
+              Upload Call Recordings
+            </h1>
+          </div>
+        </div>
+        
+        {/* Upload form */}
+        <div className="p-4">
+          {uploadError && (
+            <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+              <div className="flex items-center">
+                <AlertCircle className="h-5 w-5 mr-2" />
+                <span>{uploadError}</span>
+              </div>
+            </div>
+          )}
+          
+          {successMessage && (
+            <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg text-green-700">
+              <div className="flex items-center">
+                <CheckCircle className="h-5 w-5 mr-2" />
+                <span>{successMessage}</span>
+              </div>
+            </div>
+          )}
+          
+          {batchResults && (
+            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h3 className="text-lg font-medium text-blue-800 mb-2">Batch Upload Results</h3>
+              <div className="flex items-center mb-3">
+                <div className="text-blue-700">
+                  <span className="font-medium">{batchResults.totalFiles}</span> files processed: 
+                  <span className="font-medium text-green-600 ml-2">{batchResults.successCount}</span> successful, 
+                  <span className="font-medium text-red-600 ml-2">{batchResults.failureCount}</span> failed
+                </div>
+              </div>
+              
+              {batchResults.failureCount > 0 && (
+                <div className="mt-3">
+                  <h4 className="text-sm font-medium text-red-700 mb-1">Failed uploads:</h4>
+                  <ul className="text-sm text-red-600 list-disc pl-5">
+                    {batchResults.results
+                      .filter(r => !r.success)
+                      .map((result, index) => (
+                        <li key={index}>
+                          {result.filename}: {result.error}
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+          
+          <UploadForm 
+            onUpload={handleFileUpload}
+            onS3Import={handleS3Import}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}// src/app/layout.tsx
+import { Inter } from 'next/font/google';
+import './globals.css';
+
+const inter = Inter({ subsets: ['latin'] });
+
+export const metadata = {
+  title: 'Call Analyzer',
+  description: 'Audio analysis service for call recordings',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body className={inter.className}>{children}</body>
+    </html>
+  );
+}
+// src/app/api/recordings/route.ts
+import { NextRequest } from 'next/server';
+import { RecordingController } from '@/adapters/in/web/RecordingController';
+import { GetRecordingsUseCaseImpl } from '@/core/application/usecases/GetRecordingsUseCaseImpl';
+import { UploadRecordingUseCaseImpl } from '@/core/application/usecases/UploadRecordingUseCaseImpl';
+import { PrismaRecordingRepository } from '@/adapters/out/persistence/PrismaRecordingRepository';
+import { LocalFileStorageRepository } from '@/adapters/out/storage/LocalFileStorageRepository';
+import path from 'path';
+
+// Initialize dependencies
+const recordingRepository = new PrismaRecordingRepository();
+const fileStorageRepository = new LocalFileStorageRepository(
+  path.join(process.cwd(), 'public', 'uploads'),
+  process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
+);
+
+// Initialize use cases
+const getRecordingsUseCase = new GetRecordingsUseCaseImpl(recordingRepository);
+const uploadRecordingUseCase = new UploadRecordingUseCaseImpl(
+  recordingRepository,
+  fileStorageRepository
+);
+
+// Initialize controller
+const recordingController = new RecordingController(
+  getRecordingsUseCase,
+  uploadRecordingUseCase
+);
+
+export async function GET(req: NextRequest) {
+  return recordingController.getRecordings(req);
+}
+
+export async function POST(req: NextRequest) {
+  return recordingController.uploadRecording(req);
+}// src/app/page.tsx
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import Sidebar from '@/components/Sidebar';
+import RecordingFilters from '@/components/RecordingFilters';
+import RecordingsList from '@/components/RecordingsList';
+import { GetRecordingsResult } from '@/core/domain/ports/in/GetRecordingsUseCase';
+
+export default function HomePage() {
+  const [recordings, setRecordings] = useState<GetRecordingsResult>({
+    recordings: [],
+    totalCount: 0,
+    totalPages: 0,
+    currentPage: 1
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [filters, setFilters] = useState<{
+    agent?: string;
+    date?: string;
+  }>({});
+
+  // Fetch recordings when filters or page changes
+  useEffect(() => {
+    const fetchRecordings = async () => {
+      setLoading(true);
+      setError(null);
+      
+      try {
+        // Build query parameters
+        const params = new URLSearchParams({
+          page: currentPage.toString(),
+          limit: '20'
+        });
+        
+        if (filters.agent) {
+          params.append('agent', filters.agent);
+        }
+        
+        if (filters.date) {
+          params.append('date', filters.date);
+        }
+        
+        const response = await fetch(`/api/recordings?${params.toString()}`);
+        
+        if (!response.ok) {
+          throw new Error(`Error fetching recordings: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        setRecordings(data);
+      } catch (err) {
+        console.error('Failed to fetch recordings:', err);
+        setError('Failed to load recordings. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchRecordings();
+  }, [currentPage, filters]);
+
+  // Handle filter changes
+  const handleFilterChange = (newFilters: {
+    agent?: string;
+    date?: string;
+  }) => {
+    setFilters(newFilters);
+    setCurrentPage(1); // Reset to first page when filters change
+  };
+
+  // Handle page changes
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <Sidebar />
+      
+      {/* Main content */}
+      <div className="flex-1 overflow-auto">
+        {/* Header */}
+        <div className="bg-white shadow-sm p-4">
+          <div className="flex justify-between items-center">
+            <h1 className="text-xl font-semibold text-gray-800">
+              Call Recordings
+            </h1>
+            
+            {/* Filters */}
+            <RecordingFilters onFilterChange={handleFilterChange} />
+          </div>
+        </div>
+        
+        {/* Recordings list */}
+        <div className="p-4">
+          {loading ? (
+            <div className="text-center py-10">
+              <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-indigo-600 border-r-transparent"></div>
+              <p className="mt-2 text-gray-600">Loading recordings...</p>
+            </div>
+          ) : error ? (
+            <div className="text-center py-10 text-red-500">
+              {error}
+            </div>
+          ) : (
+            <RecordingsList
+              recordings={recordings.recordings}
+              totalCount={recordings.totalCount}
+              totalPages={recordings.totalPages}
+              currentPage={recordings.currentPage}
+              onPageChange={handlePageChange}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// File storage adapter fix
+// src/adapters/out/storage/LocalFileStorageRepository.ts
+import { FileStorageRepository } from '@/core/domain/ports/out/FileStorageRepository';
+import * as fs from 'fs';
+import * as path from 'path';
+import { promisify } from 'util';
+
+const writeFileAsync = promisify(fs.writeFile);
+const mkdirAsync = promisify(fs.mkdir);
+
+export class LocalFileStorageRepository implements FileStorageRepository {
+  constructor(private basePath: string, private baseUrl: string) {
+    // Ensure the upload directory exists
+    this.ensureDirectoryExists(basePath);
+  }
+
+  private async ensureDirectoryExists(dirPath: string): Promise<void> {
+    try {
+      await mkdirAsync(dirPath, { recursive: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+
+  async saveFile(filename: string, buffer: Buffer): Promise<string> {
+    try {
+      // Generate a unique filename to prevent collisions
+      const uniqueFilename = `${Date.now()}-${filename}`;
+      const relativePath = `/uploads/${uniqueFilename}`;
+      const absolutePath = path.join(process.cwd(), 'public', 'uploads', uniqueFilename);
+      
+      // Ensure directory exists
+      await this.ensureDirectoryExists(path.dirname(absolutePath));
+      
+      // Convert Buffer to Uint8Array for TypeScript compatibility
+      const uint8Array = new Uint8Array(buffer);
+      await writeFileAsync(absolutePath, uint8Array);
+      
+      // Return the relative path for storage in the database
+      return relativePath;
+    } catch (error) {
+      console.error('Error saving file:', error);
+      throw error;
+    }
+  }
+
+  getFileUrl(filepath: string): string {
+    return `${this.baseUrl}${filepath}`;
+  }
+}// src/adapters/out/persistence/PrismaRecordingRepository.ts
+import { prisma } from '@/lib/prisma';
+import { 
+  RecordingRepository 
+} from '@/core/domain/ports/out/RecordingRepository';
+import { 
+  GetRecordingsQuery, 
+  GetRecordingsResult 
+} from '@/core/domain/ports/in/GetRecordingsUseCase';
+import { Recording } from '@/core/domain/entities/Recording';
+import { Prisma } from '@prisma/client';
+
+export class PrismaRecordingRepository implements RecordingRepository {
+  async findAll(query: GetRecordingsQuery): Promise<GetRecordingsResult> {
+    const { page, limit, filter } = query;
+    const skip = (page - 1) * limit;
+    
+    // Build where conditions from filter
+    const where: Prisma.RecordingWhereInput = {};
+    if (filter) {
+      if (filter.agent) {
+        where.agent = { contains: filter.agent };
+      }
+      if (filter.date) {
+        const startDate = new Date(filter.date);
+        startDate.setHours(0, 0, 0, 0);
+        
+        const endDate = new Date(filter.date);
+        endDate.setHours(23, 59, 59, 999);
+        
+        where.createdAt = {
+          gte: startDate,
+          lte: endDate
+        };
+      }
+      if (filter.status) {
+        where.status = filter.status;
+      }
+      if (filter.source) {
+        where.source = filter.source;
+      }
+    }
+    
+    // Get total count for pagination
+    const totalCount = await prisma.recording.count({ where });
+    
+    // Get recordings with pagination
+    const recordings = await prisma.recording.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' }
+    });
+    
+    return {
+      recordings: recordings as unknown as Recording[],
+      totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      currentPage: page
+    };
+  }
+  
+  async findById(id: string): Promise<Recording | null> {
+    const recording = await prisma.recording.findUnique({
+      where: { id }
+    });
+    
+    return recording as unknown as Recording | null;
+  }
+  
+  async save(recording: Omit<Recording, 'id' | 'createdAt' | 'updatedAt'>): Promise<Recording> {
+    const createdRecording = await prisma.recording.create({
+      data: recording
+    });
+    
+    return createdRecording as unknown as Recording;
+  }
+  
+  async update(id: string, data: Partial<Recording>): Promise<Recording> {
+    // Destructure unwanted properties from data object using underscore prefix to show intentional non-use
+    const { createdAt: _createdAt, updatedAt: _updatedAt, id: _recordingId, ...updateData } = data;
+    
+    const updatedRecording = await prisma.recording.update({
+      where: { id },
+      data: updateData
+    });
+    
+    return updatedRecording as unknown as Recording;
+  }
+
+  async delete(id: string): Promise<void> {
+    await prisma.recording.delete({
+      where: { id }
+    });
+  }
+}// src/adapters/in/web/RecordingController.ts
+
+import { NextRequest, NextResponse } from 'next/server';
+import { 
+  GetRecordingsUseCase,
+  GetRecordingsQuery,
+  GetRecordingsFilter
+} from '@/core/domain/ports/in/GetRecordingsUseCase';
+import { 
+  UploadRecordingUseCase, 
+  RecordingUploadDto 
+} from '@/core/domain/ports/in/UploadRecordingUseCase';
+import { Recording } from '@/core/domain/entities/Recording';
+
+interface UploadResult {
+  success: boolean;
+  filename: string;
+  error?: string;
+  recording?: Recording;
+}
+
+export class RecordingController {
+  constructor(
+    private getRecordingsUseCase: GetRecordingsUseCase,
+    private uploadRecordingUseCase: UploadRecordingUseCase
+  ) {}
+
+  async getRecordings(req: NextRequest): Promise<NextResponse> {
+    const searchParams = req.nextUrl.searchParams;
+    
+    const page = parseInt(searchParams.get('page') || '1');
+    const limit = parseInt(searchParams.get('limit') || '20');
+    
+    // Build filter from query params
+    const filter: GetRecordingsFilter = {};
+    
+    const agent = searchParams.get('agent');
+    const date = searchParams.get('date');
+    const status = searchParams.get('status');
+    const source = searchParams.get('source');
+    
+    if (agent) filter.agent = agent;
+    if (date) filter.date = new Date(date);
+    if (status) filter.status = status;
+    if (source) filter.source = source;
+    
+    const query: GetRecordingsQuery = {
+      page,
+      limit,
+      filter: Object.keys(filter).length > 0 ? filter : undefined
+    };
+    
+    try {
+      const result = await this.getRecordingsUseCase.getRecordings(query);
+      return NextResponse.json(result);
+    } catch (error) {
+      console.error('Error fetching recordings:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch recordings' },
+        { status: 500 }
+      );
+    }
+  }
+
+  async getRecordingById(req: NextRequest, id: string): Promise<NextResponse> {
+    try {
+      const recording = await this.getRecordingsUseCase.getRecordingById(id);
+      
+      if (!recording) {
+        return NextResponse.json(
+          { error: 'Recording not found' },
+          { status: 404 }
+        );
+      }
+      
+      return NextResponse.json(recording);
+    } catch (error) {
+      console.error('Error fetching recording:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch recording' },
+        { status: 500 }
+      );
+    }
+  }
+
+  async uploadRecording(req: NextRequest): Promise<NextResponse> {
+    try {
+      const formData = await req.formData();
+      const files = formData.getAll('file') as File[] | null;
+      const source = formData.get('source') as string || 'upload';
+      const s3Key = formData.get('s3Key') as string;
+      
+      // Handle S3 import
+      if (s3Key) {
+        const dto: RecordingUploadDto = {
+          filename: `s3-file-${Date.now()}.aac`,
+          filesize: 0,
+          source: 's3',
+          s3Key: s3Key
+        };
+        
+        const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+        return NextResponse.json(recording);
+      }
+      
+      // Handle file upload(s)
+      if (!files || files.length === 0) {
+        return NextResponse.json(
+          { error: 'No file provided' },
+          { status: 400 }
+        );
+      }
+      
+      // Process a single file
+      if (files.length === 1) {
+        const file = files[0];
+        const dto: RecordingUploadDto = {
+          filename: file.name,
+          filesize: file.size,
+          source: source as 'upload' | 's3',
+        };
+        
+        // Convert File to Buffer
+        const bytes = await file.arrayBuffer();
+        dto.fileBuffer = Buffer.from(bytes);
+        
+        const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+        return NextResponse.json(recording);
+      }
+      
+      // Process multiple files in parallel (batch upload)
+      const uploadPromises = files.map(async (file) => {
+        try {
+          const dto: RecordingUploadDto = {
+            filename: file.name,
+            filesize: file.size,
+            source: source as 'upload' | 's3',
+          };
+          
+          // Convert File to Buffer
+          const bytes = await file.arrayBuffer();
+          dto.fileBuffer = Buffer.from(bytes);
+          
+          const recording = await this.uploadRecordingUseCase.uploadRecording(dto);
+          return {
+            success: true,
+            filename: file.name,
+            recording
+          } as UploadResult;
+        } catch (error) {
+          console.error(`Error processing file ${file.name}:`, error);
+          return {
+            success: false,
+            filename: file.name,
+            error: `Failed to upload ${file.name}`
+          } as UploadResult;
+        }
+      });
+      
+      const results = await Promise.all(uploadPromises);
+      return NextResponse.json({
+        totalFiles: files.length,
+        successCount: results.filter(r => r.success).length,
+        failureCount: results.filter(r => !r.success).length,
+        results
+      });
+      
+    } catch (error) {
+      console.error('Error uploading recording:', error);
+      return NextResponse.json(
+        { error: 'Failed to upload recording' },
+        { status: 500 }
+      );
+    }
+  }
+}// src/components/UploadForm.tsx
+import React, { useState, useCallback, useRef } from 'react';
+import { useDropzone } from 'react-dropzone';
+import { Upload, Cloud, CheckCircle, AlertCircle, File } from 'lucide-react';
+
+interface UploadFormProps {
+  onUpload: (file: File) => Promise<void>;
+  onS3Import: (key: string) => Promise<void>;
+}
+
+const UploadForm: React.FC<UploadFormProps> = ({ onUpload, onS3Import }) => {
+  const [uploading, setUploading] = useState<Array<{
+    id: string;
+    name: string;
+    size: number;
+    progress: number;
+    status: 'pending' | 'uploading' | 'completed' | 'error';
+  }>>([]);
+  const [s3Key, setS3Key] = useState('');
+  const [batchUploadProgress, setBatchUploadProgress] = useState(0);
+  const [totalFiles, setTotalFiles] = useState(0);
+  const [processedFiles, setProcessedFiles] = useState(0);
+  const processingRef = useRef(false);
+
+  // Simulate progress - define before using in onDrop
+  const simulateProgress = useCallback((fileId: string) => {
+    return setInterval(() => {
+      setUploading(prev => {
+        const currentItem = prev.find(item => item.id === fileId);
+        if (!currentItem || currentItem.status === 'completed' || currentItem.status === 'error') {
+          return prev;
+        }
+        
+        const newProgress = Math.min(currentItem.progress + Math.floor(Math.random() * 10) + 1, 95);
+        
+        return prev.map(item => 
+          item.id === fileId 
+            ? { ...item, progress: newProgress, status: 'uploading' } 
+            : item
+        );
+      });
+    }, 300);
+  }, []);
+
+  // Handle file drop for multiple files
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    if (acceptedFiles.length === 0) return;
+    
+    // Handle batch upload for multiple files
+    if (acceptedFiles.length > 1) {
+      await handleBatchUpload(acceptedFiles);
+      return;
+    }
+    
+    // Handle single file upload
+    const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Add file to uploading list
+    setUploading(prev => [...prev, {
+      id: fileId,
+      name: acceptedFiles[0].name,
+      size: acceptedFiles[0].size,
+      progress: 0,
+      status: 'pending'
+    }]);
+
+    try {
+      // Start progress simulation
+      const progressInterval = simulateProgress(fileId);
+      
+      // Perform the actual upload
+      await onUpload(acceptedFiles[0]);
+      
+      // Clear interval and set status to completed
+      clearInterval(progressInterval);
+      setUploading(prev => 
+        prev.map(item => 
+          item.id === fileId 
+            ? { ...item, progress: 100, status: 'completed' } 
+            : item
+        )
+      );
+      
+      // Remove from list after a delay
+      setTimeout(() => {
+        setUploading(prev => prev.filter(item => item.id !== fileId));
+      }, 3000);
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploading(prev => 
+        prev.map(item => 
+          item.id === fileId 
+            ? { ...item, status: 'error' } 
+            : item
+        )
+      );
+    }
+  }, [onUpload, simulateProgress]);
+
+  // Handle batch upload of multiple files
+  const handleBatchUpload = useCallback(async (files: File[]) => {
+    if (processingRef.current) return;
+    processingRef.current = true;
+    
+    // Initialize batch upload state
+    setTotalFiles(files.length);
+    setProcessedFiles(0);
+    setBatchUploadProgress(0);
+    
+    // Create entries for all files
+    const fileEntries = files.map(file => ({
+      id: `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      status: 'pending' as const
+    }));
+    
+    setUploading(prev => [...prev, ...fileEntries]);
+    
+    // Process files in batches of 5 to avoid overwhelming the server
+    const batchSize = 5;
+    const fileBatches = [];
+    
+    for (let i = 0; i < files.length; i += batchSize) {
+      fileBatches.push(files.slice(i, i + batchSize));
+    }
+    
+    for (let i = 0; i < fileBatches.length; i++) {
+      const batch = fileBatches[i];
+      await Promise.all(
+        batch.map(async (file, index) => {
+          const currentIndex = i * batchSize + index;
+          const fileId = fileEntries[currentIndex].id;
+          
+          // Start progress simulation
+          const progressInterval = simulateProgress(fileId);
+          
+          try {
+            // Perform the actual upload
+            await onUpload(file);
+            
+            // Update file status
+            setUploading(prev => 
+              prev.map(item => 
+                item.id === fileId 
+                  ? { ...item, progress: 100, status: 'completed' } 
+                  : item
+              )
+            );
+          } catch (error) {
+            console.error(`Error uploading ${file.name}:`, error);
+            setUploading(prev => 
+              prev.map(item => 
+                item.id === fileId 
+                  ? { ...item, status: 'error' } 
+                  : item
+              )
+            );
+          } finally {
+            clearInterval(progressInterval);
+            
+            // Update processed count and overall progress
+            setProcessedFiles(prev => {
+              const newValue = prev + 1;
+              setBatchUploadProgress(Math.round((newValue / files.length) * 100));
+              return newValue;
+            });
+          }
+        })
+      );
+    }
+    
+    // Clean up completed files after a delay
+    setTimeout(() => {
+      setUploading(prev => 
+        prev.filter(item => item.status === 'error' || item.status === 'uploading')
+      );
+      processingRef.current = false;
+    }, 5000);
+    
+  }, [onUpload, simulateProgress]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'audio/*': ['.aac', '.mp3', '.wav', '.m4a', '.ogg'],
+      'application/octet-stream': ['.aac', '.mp3', '.wav', '.m4a', '.ogg'],
+    },
+    maxSize: 100 * 1024 * 1024, // 100MB max file size
+    maxFiles: 100, // Allow up to 100 files
+    multiple: true // Enable multiple file selection
+  });
+
+  // Format file size
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + ' B';
+    else if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    else if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+    else return (bytes / 1073741824).toFixed(1) + ' GB';
+  };
+
+  // Handle S3 import
+  const handleS3Import = useCallback(async () => {
+    if (!s3Key) return;
+    
+    const fileId = `s3-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Add to uploading list
+    setUploading(prev => [...prev, {
+      id: fileId,
+      name: `S3 Import: ${s3Key}`,
+      size: 0,
+      progress: 0,
+      status: 'pending'
+    }]);
+
+    try {
+      // Start progress simulation
+      const progressInterval = simulateProgress(fileId);
+      
+      // Perform the actual import
+      await onS3Import(s3Key);
+      
+      // Clear interval and set status to completed
+      clearInterval(progressInterval);
+      setUploading(prev => 
+        prev.map(item => 
+          item.id === fileId 
+            ? { ...item, progress: 100, status: 'completed' } 
+            : item
+        )
+      );
+      
+      // Clear S3 key input
+      setS3Key('');
+      
+      // Remove from list after a delay
+      setTimeout(() => {
+        setUploading(prev => prev.filter(item => item.id !== fileId));
+      }, 3000);
+    } catch (error) {
+      console.error('S3 import error:', error);
+      setUploading(prev => 
+        prev.map(item => 
+          item.id === fileId 
+            ? { ...item, status: 'error' } 
+            : item
+        )
+      );
+    }
+  }, [s3Key, onS3Import, simulateProgress]);
+
+  return (
+    <div>
+      <div className="bg-white rounded-lg shadow p-6 mb-4">
+        <div 
+          {...getRootProps()} 
+          className={`border-2 border-dashed ${
+            isDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300'
+          } rounded-lg p-6 text-center cursor-pointer`}
+        >
+          <input {...getInputProps()} />
+          <Upload className="h-10 w-10 mx-auto text-gray-400 mb-3" />
+          <h2 className="text-lg font-medium mb-2">Upload Audio Files</h2>
+          <p className="text-gray-500 mb-4">
+            {isDragActive
+              ? 'Drop the files here...'
+              : 'Drag and drop audio files here, or click to select files (up to 100 files)'}
+          </p>
+          <div className="flex justify-center space-x-4">
+            <button 
+              type="button"
+              onClick={(e) => { e.stopPropagation(); }}
+              className="inline-block px-4 py-2 bg-indigo-600 text-white font-medium rounded cursor-pointer hover:bg-indigo-700 transition"
+            >
+              Browse Files
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Batch Upload Progress */}
+      {totalFiles > 1 && (
+        <div className="bg-white rounded-lg shadow p-6 mb-4">
+          <h3 className="text-md font-medium mb-2">Batch Upload Progress</h3>
+          <div className="flex items-center">
+            <div className="flex-grow">
+              <div className="h-2 bg-gray-200 rounded-full">
+                <div 
+                  className="h-2 bg-indigo-600 rounded-full" 
+                  style={{ width: `${batchUploadProgress}%` }}
+                ></div>
+              </div>
+            </div>
+            <span className="ml-4 text-sm font-medium text-gray-700">
+              {processedFiles}/{totalFiles} completed
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* File upload list */}
+      {uploading.length > 0 && (
+        <div className="bg-white rounded-lg shadow p-6 mb-4">
+          <h3 className="text-md font-medium mb-2">Upload Queue</h3>
+          <div className="max-h-60 overflow-y-auto">
+            {uploading.map(item => (
+              <div key={item.id} className="border-b border-gray-100 py-2 last:border-b-0">
+                <div className="flex items-center mb-1">
+                  <File className="h-4 w-4 text-gray-400 mr-2" />
+                  <div className="text-sm font-medium text-gray-800 truncate flex-grow mr-2">
+                    {item.name}
+                  </div>
+                  {item.status === 'completed' && (
+                    <CheckCircle className="h-4 w-4 text-green-500" />
+                  )}
+                  {item.status === 'error' && (
+                    <AlertCircle className="h-4 w-4 text-red-500" />
+                  )}
+                  {item.status === 'uploading' && (
+                    <span className="text-xs text-indigo-600 font-medium">
+                      {item.progress}%
+                    </span>
+                  )}
+                </div>
+                {item.size > 0 && (
+                  <div className="flex items-center text-xs text-gray-500">
+                    <span>{formatFileSize(item.size)}</span>
+                  </div>
+                )}
+                <div className="h-1 bg-gray-100 rounded-full mt-1">
+                  <div 
+                    className={`h-1 rounded-full ${
+                      item.status === 'completed' 
+                        ? 'bg-green-500' 
+                        : item.status === 'error' 
+                          ? 'bg-red-500' 
+                          : 'bg-indigo-600'
+                    }`}
+                    style={{ width: `${item.progress}%` }}
+                  ></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-lg shadow p-6 mb-4">
+        <h2 className="text-lg font-medium mb-4">Import from S3</h2>
+        <div className="flex items-end gap-4">
+          <div className="flex-grow">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              S3 Object Key
+            </label>
+            <input 
+              type="text" 
+              value={s3Key}
+              onChange={(e) => setS3Key(e.target.value)}
+              placeholder="Enter S3 object key"
+              className="w-full rounded-md border border-gray-300 shadow-sm py-2 px-3"
+            />
+          </div>
+          <button 
+            type="button"
+            onClick={handleS3Import}
+            disabled={!s3Key}
+            className={`px-4 py-2 rounded font-medium ${
+              s3Key 
+                ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+            } transition`}
+          >
+            <Cloud className="h-4 w-4 inline-block mr-2" />
+            Import
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default UploadForm;// src/components/LoadingSpinner.tsx
+import React from 'react';
+
+interface LoadingSpinnerProps {
+  size?: 'small' | 'medium' | 'large';
+  message?: string;
+}
+
+const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({ 
+  size = 'medium', 
+  message = 'Loading...' 
+}) => {
+  const sizeClasses = {
+    small: 'h-4 w-4',
+    medium: 'h-8 w-8',
+    large: 'h-12 w-12'
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-center">
+      <div 
+        className={`animate-spin rounded-full border-4 border-solid border-indigo-600 border-r-transparent ${sizeClasses[size]}`} 
+      />
+      {message && (
+        <p className="mt-2 text-gray-600 text-sm">{message}</p>
+      )}
+    </div>
+  );
+};
+
+export default LoadingSpinner; // src/components/RecordingFilters.tsx
+import React, { useState } from 'react';
+import { Filter, Calendar, User, Search } from 'lucide-react';
+
+interface RecordingFiltersProps {
+  onFilterChange: (filters: {
+    agent?: string;
+    date?: string;
+  }) => void;
+}
+
+const RecordingFilters: React.FC<RecordingFiltersProps> = ({ onFilterChange }) => {
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [dateFilter, setDateFilter] = useState('');
+  const [agentFilter, setAgentFilter] = useState('');
+
+  const handleApplyFilters = () => {
+    onFilterChange({
+      agent: agentFilter || undefined,
+      date: dateFilter || undefined,
+    });
+    setFilterOpen(false);
+  };
+
+  const handleClearFilters = () => {
+    setDateFilter('');
+    setAgentFilter('');
+    onFilterChange({});
+  };
+
+  return (
+    <div>
+      <div className="flex items-center">
+        <button 
+          className="flex items-center text-gray-600 hover:text-gray-900 mr-3"
+          onClick={() => setFilterOpen(!filterOpen)}
+        >
+          <Filter className="h-4 w-4 mr-1" />
+          <span>Filters</span>
+        </button>
+        
+        <div className="relative">
+          <input 
+            type="text" 
+            placeholder="Search..."
+            className="rounded-lg border border-gray-300 py-1 px-3 text-sm"
+            onChange={(e) => onFilterChange({ ...{ agent: agentFilter, date: dateFilter }, agent: e.target.value || undefined })}
+          />
+          <Search className="h-4 w-4 absolute right-2 top-1.5 text-gray-400" />
+        </div>
+      </div>
+      
+      {/* Filter panel */}
+      {filterOpen && (
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <Calendar className="h-4 w-4 inline-block mr-1" />
+              Date Filter
+            </label>
+            <input 
+              type="date" 
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="w-full rounded-md border border-gray-300 shadow-sm py-1.5 px-3 text-sm"
+            />
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              <User className="h-4 w-4 inline-block mr-1" />
+              Agent
+            </label>
+            <input 
+              type="text" 
+              placeholder="Filter by agent name"
+              value={agentFilter}
+              onChange={(e) => setAgentFilter(e.target.value)}
+              className="w-full rounded-md border border-gray-300 shadow-sm py-1.5 px-3 text-sm"
+            />
+          </div>
+          
+          <div className="md:col-span-2 flex justify-end">
+            <button 
+              className="text-sm text-gray-600 hover:text-gray-900 mr-4"
+              onClick={handleClearFilters}
+            >
+              Clear All
+            </button>
+            <button 
+              className="text-sm bg-indigo-600 text-white px-3 py-1 rounded hover:bg-indigo-700"
+              onClick={handleApplyFilters}
+            >
+              Apply Filters
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default RecordingFilters;// src/components/Sidebar.tsx
+import React from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { Upload, Play, Cloud, ChevronRight } from 'lucide-react';
+
+const Sidebar = () => {
+  const pathname = usePathname();
+  
+  return (
+    <div className="w-64 bg-indigo-900 text-white flex flex-col h-screen">
+      <div className="p-4 border-b border-indigo-800">
+        <h1 className="text-xl font-bold">Call Analyzer</h1>
+        <p className="text-xs text-indigo-300 mt-1">Audio Analysis Service</p>
+      </div>
+      
+      {/* Navigation */}
+      <div className="p-4">
+        <h2 className="text-xs font-semibold text-indigo-300 uppercase tracking-wider mb-3">Navigation</h2>
+        <ul>
+          <li className="mb-2">
+            <Link 
+              href="/"
+              className={`flex items-center w-full p-2 rounded ${
+                pathname === '/' ? 'bg-indigo-800' : 'hover:bg-indigo-800'
+              }`}
+            >
+              <Play className="h-4 w-4 mr-2" />
+              <span>Recordings</span>
+            </Link>
+          </li>
+          <li className="mb-2">
+            <Link 
+              href="/uploads"
+              className={`flex items-center w-full p-2 rounded ${
+                pathname === '/uploads' ? 'bg-indigo-800' : 'hover:bg-indigo-800'
+              }`}
+            >
+              <Upload className="h-4 w-4 mr-2" />
+              <span>Upload</span>
+            </Link>
+          </li>
+        </ul>
+      </div>
+      
+      {/* Upload section */}
+      <div className="p-4">
+        <h2 className="text-xs font-semibold text-indigo-300 uppercase tracking-wider mb-3">Upload Options</h2>
+        <div className="space-y-3">
+          <Link 
+            href="/uploads"
+            className="block w-full p-2 bg-indigo-700 hover:bg-indigo-600 rounded text-center cursor-pointer transition"
+          >
+            <span className="flex items-center justify-center">
+              <Upload className="h-4 w-4 mr-2" />
+              Upload AAC File
+            </span>
+          </Link>
+          
+          <Link 
+            href="/uploads?source=s3"
+            className="flex items-center justify-center w-full p-2 bg-indigo-700 hover:bg-indigo-600 rounded transition"
+          >
+            <Cloud className="h-4 w-4 mr-2" />
+            Import from S3
+          </Link>
+        </div>
+      </div>
+      
+      {/* Future Features */}
+      <div className="mt-auto p-4 border-t border-indigo-800">
+        <h2 className="text-xs font-semibold text-indigo-300 uppercase tracking-wider mb-3">Coming Soon</h2>
+        <ul className="text-sm text-indigo-300">
+          <li className="flex items-center mb-2">
+            <ChevronRight className="h-3 w-3 mr-2" />
+            <span>Call Sentiment Analysis</span>
+          </li>
+          <li className="flex items-center mb-2">
+            <ChevronRight className="h-3 w-3 mr-2" />
+            <span>Transcription Services</span>
+          </li>
+          <li className="flex items-center">
+          
+            <ChevronRight className="h-3 w-3 mr-2" />
+            <span>Agent Performance Metrics</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  );
+};
+
+export default Sidebar;// src/components/RecordingsList.tsx
+import React, { useState } from 'react';
+import { Play, Pause, Download, Clock, CheckCircle, AlertCircle } from 'lucide-react';
+import { Recording } from '@/core/domain/entities/Recording';
+
+interface RecordingsListProps {
+  recordings: Recording[];
+  totalCount: number;
+  totalPages: number;
+  currentPage: number;
+  onPageChange: (page: number) => void;
+}
+
+const RecordingsList: React.FC<RecordingsListProps> = ({
+  recordings,
+  totalCount,
+  totalPages,
+  currentPage,
+  onPageChange
+}) => {
+  const [isPlayingId, setIsPlayingId] = useState<string | null>(null);
+  const recordingsPerPage = 20;
+
+  // Format file size
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + ' B';
+    else if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    else if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+    else return (bytes / 1073741824).toFixed(1) + ' GB';
+  };
+
+  // Format date
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Toggle play/pause for a recording
+  const togglePlayPause = (id: string) => {
+    if (isPlayingId === id) {
+      setIsPlayingId(null);
+    } else {
+      setIsPlayingId(id);
+    }
+  };
+
+  // Render status icon
+  const renderStatusIcon = (status: string) => {
+    switch (status) {
+      case 'processing':
+        return <Clock className="h-5 w-5 text-blue-500" />;
+      case 'completed':
+        return <CheckCircle className="h-5 w-5 text-green-500" />;
+      case 'error':
+        return <AlertCircle className="h-5 w-5 text-red-500" />;
+      default:
+        return <Clock className="h-5 w-5 text-yellow-500" />;
+    }
+  };
+
+  return (
+    <div>
+      {recordings.length === 0 ? (
+        <div className="text-center py-10 text-gray-500">
+          No recordings match your search criteria
+        </div>
+      ) : (
+        <>
+          <div className="bg-white rounded-lg shadow overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Filename</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {recordings.map(recording => (
+                  <tr key={recording.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center">
+                        <div className="text-sm font-medium text-gray-900">{recording.filename}</div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-900">{recording.agent}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-500">{formatDate(recording.createdAt.toString())}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {recording.duration || '0:00'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {formatFileSize(recording.filesize)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                        recording.source === 's3' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'
+                      }`}>
+                        {recording.source === 's3' ? 'S3' : 'Upload'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center">
+                        {renderStatusIcon(recording.status)}
+                        <span className="ml-2 text-sm capitalize text-gray-700">
+                          {recording.status}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      <div className="flex space-x-2">
+                        <button 
+                          onClick={() => togglePlayPause(recording.id)}
+                          className={`text-gray-600 hover:text-gray-900`}
+                          disabled={recording.status === 'processing'}
+                        >
+                          {isPlayingId === recording.id ? 
+                            <Pause className="h-5 w-5" /> : 
+                            <Play className="h-5 w-5" />
+                          }
+                        </button>
+                        <button 
+                          className="text-blue-600 hover:text-blue-900"
+                          disabled={recording.status === 'processing'}
+                        >
+                          <Download className="h-5 w-5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex justify-between items-center mt-4">
+              <div className="text-sm text-gray-700">
+                Showing <span className="font-medium">{(currentPage - 1) * recordingsPerPage + 1}</span> to <span className="font-medium">
+                  {Math.min(currentPage * recordingsPerPage, totalCount)}
+                </span> of <span className="font-medium">{totalCount}</span> recordings
+              </div>
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => onPageChange(Math.max(currentPage - 1, 1))}
+                  disabled={currentPage === 1}
+                  className={`px-3 py-1 rounded border ${
+                    currentPage === 1 
+                      ? 'bg-gray-100 text-gray-400 border-gray-200' 
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Previous
+                </button>
+                <button 
+                  onClick={() => onPageChange(Math.min(currentPage + 1, totalPages))}
+                  disabled={currentPage === totalPages}
+                  className={`px-3 py-1 rounded border ${
+                    currentPage === totalPages 
+                      ? 'bg-gray-100 text-gray-400 border-gray-200' 
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+export default RecordingsList;// src/lib/prisma.ts
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined;
+};
+
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    log: ["query"],
+  });
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prisma = prisma;
+}/**
+ * Utilities for generating file hashes used in deduplication
+ */
+import crypto from 'crypto';
+
+/**
+ * Generates a SHA-256 hash from a Buffer
+ * 
+ * @param buffer The file buffer to hash
+ * @returns A hex string representing the SHA-256 hash
+ */
+export function generateFileHash(buffer: Buffer): string {
+  const hash = crypto.createHash('sha256');
+  hash.update(buffer);
+  return hash.digest('hex');
+}
+
+/**
+ * Generates a hash from a File object
+ * 
+ * @param file A File object to generate a hash for
+ * @returns A Promise resolving to a hex string representing the SHA-256 hash
+ */
+export async function generateFileHashFromFile(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  return generateFileHash(buffer);
+}
+
+/**
+ * Error class for duplicate file uploads
+ */
+export class DuplicateFileError extends Error {
+  originalFile: any;
+  
+  constructor(message: string, originalFile?: any) {
+    super(message);
+    this.name = 'DuplicateFileError';
+    this.originalFile = originalFile;
+  }
+}  
