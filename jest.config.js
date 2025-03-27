@@ -17,4 +17,4 @@ module.exports = {
   transformIgnorePatterns: [
     '/node_modules/(?!next|@next)/'
   ]
-}; 
+};

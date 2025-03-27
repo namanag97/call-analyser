@@ -1,32 +1,46 @@
-// Set up any global test configuration here
-// For example, increase timeout for async tests
+// jest.setup.js
+// Set up any global test configuration
 jest.setTimeout(30000);
 
 // Mock environment variables that are needed for tests
-process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test_db';
+process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/call_analyzer_test';
 process.env.ELEVENLABS_API_KEY = 'test-api-key';
 process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:3000';
 
 // Mock Next.js components and functions
-jest.mock('next/navigation', () => ({
-  useRouter: jest.fn(() => ({
-    push: jest.fn(),
-    replace: jest.fn(),
-    prefetch: jest.fn(),
-    back: jest.fn(),
-    reload: jest.fn(),
-    refresh: jest.fn(),
-    route: '/',
-    pathname: '/',
-    query: {},
-    asPath: '/',
-    events: {
-      on: jest.fn(),
-      off: jest.fn(),
-      emit: jest.fn(),
-    },
-  })),
-  useParams: jest.fn(() => ({})),
-  usePathname: jest.fn(() => '/'),
-  useSearchParams: jest.fn(() => ({ get: jest.fn(() => null) })),
-})); 
+jest.mock('next/navigation', () => {
+  return {
+    useRouter: jest.fn().mockReturnValue({
+      push: jest.fn(),
+      replace: jest.fn(),
+      prefetch: jest.fn(),
+      back: jest.fn(),
+      forward: jest.fn(),
+      refresh: jest.fn()
+    }),
+    useParams: jest.fn().mockReturnValue({}),
+    usePathname: jest.fn().mockReturnValue('/'),
+    useSearchParams: jest.fn().mockReturnValue({
+      get: jest.fn(),
+      getAll: jest.fn(),
+      has: jest.fn(),
+      forEach: jest.fn(),
+      entries: jest.fn(),
+      keys: jest.fn(),
+      values: jest.fn(),
+      toString: jest.fn()
+    })
+  };
+});
+
+// Mock Next.js image component
+jest.mock('next/image', () => ({
+  __esModule: true,
+  default: (props) => {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img {...props} alt={props.alt || ''} />;
+  }
+}));
+
+// Add @testing-library/jest-dom matchers
+require('@testing-library/jest-dom');
