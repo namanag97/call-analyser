@@ -1,35 +1,30 @@
 // src/app/api/recordings/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { RecordingController } from '@/adapters/in/web/RecordingController';
-import { GetRecordingsUseCaseImpl } from '@/core/application/usecases/GetRecordingsUseCaseImpl';
-import { UploadRecordingUseCaseImpl } from '@/core/application/usecases/UploadRecordingUseCaseImpl';
-import { PrismaRecordingRepository } from '@/adapters/out/persistence/PrismaRecordingRepository';
-import { LocalFileStorageRepository } from '@/adapters/out/storage/LocalFileStorageRepository';
-import path from 'path';
-
-// Initialize dependencies
-const recordingRepository = new PrismaRecordingRepository();
-const fileStorageRepository = new LocalFileStorageRepository(
-  path.join(process.cwd(), 'public', 'uploads'),
-  process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
-);
-
-// Initialize use cases
-const getRecordingsUseCase = new GetRecordingsUseCaseImpl(recordingRepository);
-const uploadRecordingUseCase = new UploadRecordingUseCaseImpl(
-  recordingRepository,
-  fileStorageRepository
-);
+import { RecordingController } from '@/core/controllers/RecordingController';
+import { prisma } from '@/lib/prisma';
 
 // Initialize controller
-const recordingController = new RecordingController(
-  getRecordingsUseCase,
-  uploadRecordingUseCase
-);
+const recordingController = new RecordingController();
 
 export async function GET(req: NextRequest) {
-  // Note: We've removed the auth middleware for now as requested
-  return recordingController.getRecordings(req);
+  try {
+    // Use the controller to get recordings
+    const recordings = await recordingController.getRecordings();
+    
+    return NextResponse.json({
+      recordings,
+      count: recordings.length
+    });
+  } catch (error) {
+    console.error('Failed to fetch recordings:', error);
+    return NextResponse.json(
+      { 
+        error: `Failed to fetch recordings: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        recordings: []
+      },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {

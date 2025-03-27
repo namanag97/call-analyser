@@ -26,62 +26,67 @@ export class RecordingController {
   ) {}
 
   async getRecordings(req: NextRequest): Promise<NextResponse> {
-    const searchParams = req.nextUrl.searchParams;
-    
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '20');
-    
-    // Build filter from query params
-    const filter: GetRecordingsFilter = {};
-    
-    const agent = searchParams.get('agent');
-    const date = searchParams.get('date');
-    const status = searchParams.get('status');
-    const source = searchParams.get('source');
-    
-    if (agent) filter.agent = agent;
-    if (date) filter.date = new Date(date);
-    
-    // Handle enum values for status and source
-    if (status && Object.values(RecordingStatus).includes(status as RecordingStatus)) {
-      filter.status = status as RecordingStatus;
-    }
-    
-    if (source && Object.values(RecordingSource).includes(source as RecordingSource)) {
-      filter.source = source as RecordingSource;
-    }
-    
-    const query: GetRecordingsQuery = {
-      page,
-      limit,
-      filter: Object.keys(filter).length > 0 ? filter : undefined
-    };
-    
     try {
-      const result = await this.getRecordingsUseCase.getRecordings(query);
+      const searchParams = req.nextUrl.searchParams;
       
-      // For public API, return only necessary fields
-      const simplifiedRecordings = result.recordings.map(recording => ({
-        id: recording.id,
-        filename: recording.filename,
-        status: recording.status,
-        createdAt: recording.createdAt,
-        agent: recording.agent,
-        duration: recording.duration,
-        filesize: recording.filesize,
-        source: recording.source
-      }));
+      const page = parseInt(searchParams.get('page') || '1');
+      const limit = parseInt(searchParams.get('limit') || '20');
       
-      return NextResponse.json({
-        recordings: simplifiedRecordings,
-        totalCount: result.totalCount,
-        totalPages: result.totalPages,
-        currentPage: result.currentPage
-      });
+      // Build filter from query params
+      const filter: GetRecordingsFilter = {};
+      
+      const agent = searchParams.get('agent');
+      const date = searchParams.get('date');
+      const status = searchParams.get('status');
+      const source = searchParams.get('source');
+      
+      if (agent) filter.agent = agent;
+      if (date) filter.date = new Date(date);
+      
+      // Handle enum values for status and source
+      if (status && Object.values(RecordingStatus).includes(status as RecordingStatus)) {
+        filter.status = status as RecordingStatus;
+      }
+      
+      if (source && Object.values(RecordingSource).includes(source as RecordingSource)) {
+        filter.source = source as RecordingSource;
+      }
+      
+      const query: GetRecordingsQuery = {
+        page,
+        limit,
+        filter: Object.keys(filter).length > 0 ? filter : undefined
+      };
+      
+      try {
+        const result = await this.getRecordingsUseCase.getRecordings(query);
+        
+        // Ensure we have recordings array, even if empty
+        const recordings = result.recordings || [];
+        
+        // Log diagnostic information
+        console.log(`Found ${recordings.length} recordings with transcription data:`);
+        recordings.forEach(recording => {
+          console.log(`Recording ID: ${recording.id}, Has transcription: ${!!recording.transcription}, Status: ${recording.status}`);
+        });
+        
+        return NextResponse.json({
+          recordings,
+          totalCount: result.totalCount,
+          totalPages: result.totalPages,
+          currentPage: result.currentPage
+        });
+      } catch (error) {
+        console.error('Error fetching recordings:', error);
+        return NextResponse.json(
+          { error: 'Failed to fetch recordings', recordings: [] },
+          { status: 500 }
+        );
+      }
     } catch (error) {
-      console.error('Error fetching recordings:', error);
+      console.error('Unexpected error in getRecordings:', error);
       return NextResponse.json(
-        { error: 'Failed to fetch recordings' },
+        { error: 'Failed to fetch recordings', recordings: [] },
         { status: 500 }
       );
     }

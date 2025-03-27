@@ -47,38 +47,95 @@ export default function TranscriptionsPage() {
   });
   const [showFilters, setShowFilters] = useState(false);
 
-  // Fetch recordings with transcription data
+  // Fetch transcription data
   useEffect(() => {
-    const fetchRecordings = async () => {
+    const fetchData = async () => {
       try {
         setLoading(true);
         setError(null);
         
-        // In a real app, you'd include filter parameters in the API call
-        const response = await fetch('/api/recordings');
+        // First try to fetch from the transcriptions API
+        console.log('Fetching from /api/transcriptions...');
+        const response = await fetch('/api/transcriptions');
         
         if (!response.ok) {
-          throw new Error(`Error fetching recordings: ${response.status}`);
+          throw new Error(`Error fetching transcriptions: ${response.status}`);
         }
         
         const data = await response.json();
+        console.log('Fetched transcriptions data:', data);
+        
+        // Fix for handling API response properly
+        if (data && data.transcriptions) {
+          // Check if we have valid transcriptions with recording data
+          const validTranscriptions = data.transcriptions
+            .filter((t: any) => t && t.recording && t.recordingId);
+          
+          console.log(`Found ${validTranscriptions.length} valid transcriptions with recordings`);
+          
+          if (validTranscriptions.length > 0) {
+            // Map to the expected format for the UI
+            const recordingsWithTranscriptions = validTranscriptions.map((transcription: any) => ({
+              ...transcription.recording,
+              transcription: {
+                id: transcription.id,
+                recordingId: transcription.recordingId,
+                status: transcription.status,
+                text: transcription.text,
+                language: transcription.language,
+                speakers: transcription.speakers,
+                processingTimeMs: transcription.processingTimeMs,
+                createdAt: transcription.createdAt,
+                updatedAt: transcription.updatedAt,
+                error: transcription.error
+              }
+            }));
+            
+            console.log('Prepared recordings with transcriptions:', recordingsWithTranscriptions);
+            setRecordings(recordingsWithTranscriptions);
+            return; // Exit early, we have what we need
+          } else {
+            console.log('No valid transcriptions found with recordings');
+          }
+        }
+          
+        // If we get here, we need to try the recordings API
+        console.log('Falling back to /api/recordings...');
+        const recordingsResponse = await fetch('/api/recordings');
+        
+        if (!recordingsResponse.ok) {
+          throw new Error(`Error fetching recordings: ${recordingsResponse.status}`);
+        }
+        
+        const recordingsData = await recordingsResponse.json();
+        console.log('Fetched recordings data:', recordingsData);
+        
+        // Check if data.recordings exists and is an array
+        if (!recordingsData.recordings || !Array.isArray(recordingsData.recordings)) {
+          console.error('Invalid response format from recordings API:', recordingsData);
+          throw new Error('Invalid response format from API');
+        }
+        
         // Filter to only include recordings with transcriptions or that have been processed
-        const filteredRecordings = data.recordings.filter((recording: Recording) => 
+        const filteredRecordings = recordingsData.recordings.filter((recording: Recording) => 
           recording.transcription || 
           recording.status === 'COMPLETED' || 
           recording.status === 'PENDING_TRANSCRIPTION' || 
           recording.status === 'TRANSCRIBING'
         );
+        
+        console.log('Filtered recordings from recordings API:', filteredRecordings);
         setRecordings(filteredRecordings);
       } catch (err) {
-        console.error('Failed to fetch recordings:', err);
+        console.error('Failed to fetch data:', err);
         setError('Failed to load transcription data');
+        setRecordings([]); // Set empty array on error so UI shows proper message
       } finally {
         setLoading(false);
       }
     };
     
-    fetchRecordings();
+    fetchData();
   }, []);
 
   // Apply search and filters to recordings

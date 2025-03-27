@@ -58,14 +58,14 @@ export async function POST(req: NextRequest) {
     if (error instanceof ValidationError) {
       return NextResponse.json(
         { error: error.message },
-        { status: error.statusCode }
+        { status: 400 }
       );
     }
     
     if (error instanceof NotFoundError) {
       return NextResponse.json(
         { error: error.message },
-        { status: error.statusCode }
+        { status: 404 }
       );
     }
     
@@ -83,35 +83,62 @@ export async function GET(req: NextRequest) {
 
     if (recordingId) {
       // Get specific transcription
-      const transcription = await prisma.transcription.findUnique({
-        where: { recordingId }
-      });
+      try {
+        const transcription = await prisma.transcription.findUnique({
+          where: { recordingId }
+        });
 
-      if (!transcription) {
+        if (!transcription) {
+          return NextResponse.json(
+            { error: 'Transcription not found' },
+            { status: 404 }
+          );
+        }
+
+        return NextResponse.json(transcription);
+      } catch (findError) {
+        console.error('Error finding transcription:', findError);
         return NextResponse.json(
-          { error: 'Transcription not found' },
-          { status: 404 }
+          { error: 'Error finding transcription', details: (findError as Error).message },
+          { status: 500 }
         );
       }
-
-      return NextResponse.json(transcription);
     } else {
       // Get all transcriptions
-      const transcriptions = await prisma.transcription.findMany({
-        include: {
-          recording: true
-        },
-        orderBy: {
-          createdAt: 'desc'
-        }
-      });
+      try {
+        // Just use include without explicitly selecting fields
+        const transcriptions = await prisma.transcription.findMany({
+          include: {
+            recording: true
+          },
+          orderBy: {
+            createdAt: 'desc'
+          }
+        });
 
-      return NextResponse.json({ transcriptions });
+        console.log(`Found ${transcriptions.length} transcriptions`);
+        
+        // Check what we're getting back from the database
+        transcriptions.forEach((t, i) => {
+          console.log(`Transcription ${i+1}: ID=${t.id}, RecordingID=${t.recordingId}, HasRecording=${!!t.recording}`);
+        });
+        
+        return NextResponse.json({ 
+          transcriptions: transcriptions || [],
+          count: transcriptions.length
+        });
+      } catch (dbError) {
+        console.error('Database error when fetching transcriptions:', dbError);
+        return NextResponse.json(
+          { error: 'Database error', details: (dbError as Error).message, transcriptions: [] },
+          { status: 500 }
+        );
+      }
     }
   } catch (error) {
     console.error('Error fetching transcriptions:', error);
     return NextResponse.json(
-      { error: 'Failed to fetch transcriptions' },
+      { error: 'Failed to fetch transcriptions', details: (error as Error).message, transcriptions: [] },
       { status: 500 }
     );
   }

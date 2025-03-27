@@ -26,6 +26,7 @@ export interface Recording {
   source: RecordingSource;
   createdAt: Date;
   updatedAt: Date;
+  transcription?: Transcription;
 }
 
 export type TranscriptionStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
